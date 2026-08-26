@@ -31,9 +31,13 @@ def put_pair(
     env.speeds[:, 0] = 200.0
 
 
-def test_reset_fixed_shapes_symmetry_and_finite_values() -> None:
+def test_reset_is_independent_distributionally_symmetric_and_reproducible() -> None:
     env = make_env()
     observations, info = env.reset(seed=17)
+    positions = env.positions.copy()
+    headings = env.headings.copy()
+    speeds = env.speeds.copy()
+    state = info["global_state"].copy()
     assert observations.shape == (2, 3, 40)
     assert env.observation_space.shape == (2, 3, 40)
     assert env.action_space.shape == (2, 3, 2)
@@ -41,9 +45,27 @@ def test_reset_fixed_shapes_symmetry_and_finite_values() -> None:
     assert np.isfinite(observations).all()
     assert np.isfinite(info["global_state"]).all()
     assert np.max(np.abs(observations)) <= 1.0 + 1e-6
-    np.testing.assert_allclose(env.positions[0, :, 0], -env.positions[1, :, 0])
-    np.testing.assert_allclose(env.positions[0, :, 1], env.positions[1, :, 1])
-    np.testing.assert_allclose(env.speeds[0], env.speeds[1])
+    assert np.all((-3_700.0 <= positions[0, :, 0]) & (positions[0, :, 0] <= -3_300.0))
+    assert np.all((3_300.0 <= positions[1, :, 0]) & (positions[1, :, 0] <= 3_700.0))
+    base_y = np.array([-1_500.0, 0.0, 1_500.0])
+    assert np.all(np.abs(positions[0, :, 1] - base_y) <= 200.0)
+    assert np.all(np.abs(positions[1, :, 1] - base_y) <= 200.0)
+    assert np.all(np.abs(headings[0]) <= math.radians(5.0))
+    blue_offsets = (headings[1] - math.pi + math.pi) % (2.0 * math.pi) - math.pi
+    assert np.all(np.abs(blue_offsets) <= math.radians(5.0))
+    assert np.all((190.0 <= speeds) & (speeds <= 210.0))
+    assert not (
+        np.allclose(positions[0, :, 0], -positions[1, :, 0])
+        and np.allclose(positions[0, :, 1], positions[1, :, 1])
+        and np.allclose(speeds[0], speeds[1])
+    )
+
+    second_observations, second_info = env.reset(seed=17)
+    np.testing.assert_allclose(second_observations, observations)
+    np.testing.assert_allclose(second_info["global_state"], state)
+    np.testing.assert_allclose(env.positions, positions)
+    np.testing.assert_allclose(env.headings, headings)
+    np.testing.assert_allclose(env.speeds, speeds)
 
 
 def test_pair_geometry_tail_and_attack_conditions() -> None:

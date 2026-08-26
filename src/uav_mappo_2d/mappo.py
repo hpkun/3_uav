@@ -272,12 +272,15 @@ class MAPPO:
                     }
                 )
 
-        return_values = returns.detach()
-        old_value_values = old_values.detach()
-        return_variance = torch.var(return_values, unbiased=False)
-        explained_variance = 1.0 - torch.var(
-            return_values - old_value_values, unbiased=False
-        ) / return_variance.clamp_min(1e-8)
+        with torch.no_grad():
+            new_values = self.critic(states)
+            return_variance = torch.var(returns, unbiased=False)
+            if float(return_variance) < 1e-8:
+                explained_variance = torch.zeros((), device=self.device)
+            else:
+                explained_variance = 1.0 - torch.var(
+                    returns - new_values, unbiased=False
+                ) / return_variance
         metrics = {
             key: float(np.mean([row[key] for row in rows])) for key in rows[0]
         }

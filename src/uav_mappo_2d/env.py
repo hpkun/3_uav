@@ -83,25 +83,24 @@ class UAVCombatEnv(gym.Env):
             [-cfg.spawn_y_spacing, 0.0, cfg.spawn_y_spacing], dtype=np.float64
         )
         position_jitter = self.np_random.uniform(
-            -cfg.spawn_jitter, cfg.spawn_jitter, size=(self.N_AGENTS, 2)
+            -cfg.spawn_jitter, cfg.spawn_jitter, size=(2, self.N_AGENTS, 2)
         )
         heading_jitter = self.np_random.uniform(
             -math.radians(cfg.heading_jitter_degrees),
             math.radians(cfg.heading_jitter_degrees),
-            size=self.N_AGENTS,
+            size=(2, self.N_AGENTS),
         )
         initial_speeds = self.np_random.uniform(
-            cfg.initial_speed_min, cfg.initial_speed_max, size=self.N_AGENTS
+            cfg.initial_speed_min, cfg.initial_speed_max, size=(2, self.N_AGENTS)
         )
 
-        self.positions[0, :, 0] = -cfg.spawn_x + position_jitter[:, 0]
-        self.positions[1, :, 0] = cfg.spawn_x - position_jitter[:, 0]
-        self.positions[0, :, 1] = base_y + position_jitter[:, 1]
-        self.positions[1, :, 1] = base_y + position_jitter[:, 1]
-        self.headings[0] = heading_jitter
-        self.headings[1] = wrap_angle(np.pi - heading_jitter)
-        self.speeds[0] = initial_speeds
-        self.speeds[1] = initial_speeds
+        self.positions[0, :, 0] = -cfg.spawn_x + position_jitter[0, :, 0]
+        self.positions[1, :, 0] = cfg.spawn_x + position_jitter[1, :, 0]
+        self.positions[0, :, 1] = base_y + position_jitter[0, :, 1]
+        self.positions[1, :, 1] = base_y + position_jitter[1, :, 1]
+        self.headings[0] = heading_jitter[0]
+        self.headings[1] = wrap_angle(np.pi + heading_jitter[1])
+        self.speeds[:] = initial_speeds
         self.alive.fill(True)
         self.step_count = 0
         self.last_winner = None
