@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uav-mappo-2d"
+version = "0.1.0"
+description = "Two-dimensional multi-UAV adversarial environment with a recurrent MAPPO baseline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "gymnasium>=0.29",
+  "numpy>=1.24",
+  "Pillow>=9.0",
+  "PyYAML>=6.0",
+  "torch>=2.0",
+  "tensorboard>=2.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+uav2d-train = "uav_mappo_2d.train:main"
+uav2d-evaluate = "uav_mappo_2d.evaluate:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
