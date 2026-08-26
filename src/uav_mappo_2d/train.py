@@ -1,25 +1,37 @@
 from __future__ import annotations
 
 import argparse
-import random
-import time
+import csv
 from collections import deque
 from pathlib import Path
+import random
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from .config import ProjectConfig, load_config
-from .env import UAVCombatEnv
-from .mappo import EpisodeBuffer, MAPPO
+from .evaluate import evaluate_policy, resolve_device
+from .mappo import MAPPO, RolloutBuffer
 from .parallel_env import ParallelUAVEnvs
 
 
-def resolve_device(requested: str) -> str:
-    if requested != "auto":
-        return requested
-    return "cuda" if torch.cuda.is_available() else "cpu"
+CSV_FIELDS = [
+    "global_step",
+    "episode",
+    "return",
+    "result",
+    "red_alive",
+    "blue_alive",
+    "red_combat_kill",
+    "blue_combat_kill",
+    "red_oob",
+    "blue_oob",
+    "event_reward",
+    "shaping_reward",
+    "terminal_reward",
+    "episode_length",
+]
 
 
 def set_seed(seed: int) -> None:
@@ -30,343 +42,270 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _duration(seconds: float) -> str:
-    seconds = max(0, int(round(seconds)))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+def _mean(rows: deque[dict[str, float | str]], key: str) -> float:
+    return float(np.mean([float(row[key]) for row in rows])) if rows else 0.0
 
 
-def _progress_line(
-    *,
-    episode: int,
-    total_episodes: int,
-    stage: str,
-    result: str,
-    episode_return: float,
-    mean_return: float,
-    win_rate: float,
-    length: int,
-    alive: list[int],
-    kills: list[int],
-    steps_per_second: float,
-    eta_seconds: float,
-    sample_seconds: float,
-    update_seconds: float,
+def _training_log(
+    global_step: int,
+    episode_index: int,
+    rows: deque[dict[str, float | str]],
+    metrics: dict[str, float],
 ) -> str:
-    percent = 100.0 * episode / max(total_episodes, 1)
+    count = max(len(rows), 1)
+    wins = sum(row["result"] == "win" for row in rows) / count
+    draws = sum(row["result"] == "draw" for row in rows) / count
+    losses = sum(row["result"] == "loss" for row in rows) / count
     return (
-        f"[TRAIN {episode:>5}/{total_episodes:<5} {percent:6.2f}%] "
-        f"stage={stage:<8} result={result} | "
-        f"return={episode_return:8.2f} avg100={mean_return:8.2f} "
-        f"win100={win_rate:6.1%} | steps={length:3d} "
-        f"kills(R:B)={kills[0]}:{kills[1]} alive(R:B)={alive[0]}:{alive[1]} "
-        f"sps={steps_per_second:6.0f} "
-        f"time(S/U)={sample_seconds:.1f}/{update_seconds:.1f}s "
-        f"eta={_duration(eta_seconds)}"
+        f"[TRAIN] step={global_step} episodes={episode_index} "
+        f"avg_return={_mean(rows, 'return'):.3f} "
+        f"W/D/L={wins:.1%}/{draws:.1%}/{losses:.1%} "
+        f"alive(R/B)={_mean(rows, 'red_alive'):.2f}/{_mean(rows, 'blue_alive'):.2f} "
+        f"combat_kill(R/B)={_mean(rows, 'red_combat_kill'):.2f}/"
+        f"{_mean(rows, 'blue_combat_kill'):.2f} "
+        f"oob(R/B)={_mean(rows, 'red_oob'):.2f}/{_mean(rows, 'blue_oob'):.2f} "
+        f"reward(event/shape)={_mean(rows, 'event_reward'):.3f}/"
+        f"{_mean(rows, 'shaping_reward'):.3f} "
+        f"length={_mean(rows, 'episode_length'):.1f} "
+        f"actor={metrics['actor_loss']:.4f} critic={metrics['critic_loss']:.4f} "
+        f"entropy={metrics['entropy']:.4f} kl={metrics['approx_kl']:.5f} "
+        f"clip={metrics['clip_fraction']:.3f} "
+        f"expl_var={metrics['explained_variance']:.3f}"
+    )
+
+
+def _write_episode(
+    writer: csv.DictWriter,
+    stream: object,
+    summary: dict[str, float | str],
+    global_step: int,
+    episode_index: int,
+) -> None:
+    writer.writerow(
+        {
+            "global_step": global_step,
+            "episode": episode_index,
+            **{key: summary[key] for key in CSV_FIELDS[2:]},
+        }
+    )
+    stream.flush()
+
+
+def _is_better_evaluation(
+    candidate: dict[str, float], current: dict[str, float] | None
+) -> bool:
+    if current is None:
+        return True
+    return (
+        candidate["win_rate"],
+        candidate["survival_difference"],
+    ) > (
+        current["win_rate"],
+        current["survival_difference"],
     )
 
 
 def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
     set_seed(config.seed)
-    device = resolve_device(config.training.device)
-    output_dir = Path(config.training.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    training = config.training
+    if training.total_env_steps % training.parallel_envs:
+        raise ValueError("total_env_steps must be divisible by parallel_envs")
+    device = resolve_device(training.device)
+    output_dir = Path(training.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(output_dir / "tensorboard")
-
-    prototype_env = UAVCombatEnv(
-        config.environment,
-        config.reward,
-        config.render,
-        project_root=Path.cwd(),
-    )
-    learner = MAPPO(
-        prototype_env.obs_dim,
-        prototype_env.state_dim,
-        prototype_env.n_agents,
-        config.mappo,
-        device,
-    )
-    opponent_policy = MAPPO(
-        prototype_env.obs_dim,
-        prototype_env.state_dim,
-        prototype_env.n_agents,
-        config.mappo,
-        device,
-    )
-    n_agents = prototype_env.n_agents
-    prototype_env.close()
-    snapshots: deque = deque(maxlen=config.training.snapshot_pool_size)
-    start_episode = 1
+    tensorboard = SummaryWriter(output_dir / "tensorboard")
+    learner = MAPPO(40, 36, 3, config.mappo, device, seed=config.seed)
+    global_step = 0
+    episode_index = 0
+    best_evaluation: dict[str, float] | None = None
     if resume:
         checkpoint = learner.load(resume)
-        start_episode = int(checkpoint.get("episode", 0)) + 1
-    snapshots.append(learner.actor_snapshot())
+        global_step = int(checkpoint.get("global_step", 0))
+        extra = checkpoint.get("extra", {})
+        episode_index = int(extra.get("episode_index", 0))
+        saved_best = extra.get("best_evaluation")
+        best_evaluation = dict(saved_best) if saved_best is not None else None
 
-    recent_returns: deque[float] = deque(maxlen=100)
-    recent_wins: deque[float] = deque(maxlen=100)
-    training_started = time.perf_counter()
-    total_environment_steps = 0
-    last_checkpoint = checkpoint_dir / "final.pt"
-    sampling_rng = np.random.default_rng(config.seed + 91_337)
-    parallel_envs = ParallelUAVEnvs(
-        config.training.parallel_envs,
+    recent_episodes: deque[dict[str, float | str]] = deque(maxlen=100)
+    last_metrics = {
+        "actor_loss": 0.0,
+        "critic_loss": 0.0,
+        "entropy": 0.0,
+        "approx_kl": 0.0,
+        "clip_fraction": 0.0,
+        "actor_grad_norm": 0.0,
+        "critic_grad_norm": 0.0,
+        "explained_variance": 0.0,
+    }
+    next_log = (
+        global_step // training.log_interval_steps + 1
+    ) * training.log_interval_steps
+    next_checkpoint = (
+        global_step // training.checkpoint_interval_steps + 1
+    ) * training.checkpoint_interval_steps
+    next_evaluation = (
+        global_step // training.evaluation_interval_steps + 1
+    ) * training.evaluation_interval_steps
+    episode_csv = output_dir / "episodes.csv"
+    csv_exists = episode_csv.exists() and episode_csv.stat().st_size > 0
+    csv_stream = episode_csv.open("a", newline="", encoding="utf-8")
+    csv_writer = csv.DictWriter(csv_stream, fieldnames=CSV_FIELDS)
+    if not csv_exists:
+        csv_writer.writeheader()
+
+    environments = ParallelUAVEnvs(
+        training.parallel_envs,
         config.environment,
         config.reward,
         config.render,
         Path.cwd(),
+        base_seed=config.seed + global_step,
+    )
+    observations, states, active_masks, _ = environments.reset()
+    print(
+        f"[START] total_env_steps={training.total_env_steps} "
+        f"rollout={training.rollout_length} parallel={training.parallel_envs} "
+        f"device={device} pids={environments.worker_pids}",
+        flush=True,
     )
     try:
-        print(
-            f"[START] episodes={config.training.episodes} agents={n_agents}v{n_agents} "
-            f"parallel={config.training.parallel_envs} pids={parallel_envs.worker_pids} "
-            f"device={device} rule_warmup={config.training.rule_opponent_episodes} "
-            f"log_every={config.training.log_interval}",
-            flush=True,
-        )
-        episode_cursor = start_episode
-        while episode_cursor <= config.training.episodes:
-            batch_episodes = list(
-                range(
-                    episode_cursor,
-                    min(
-                        episode_cursor + config.training.parallel_envs,
-                        config.training.episodes + 1,
+        while global_step < training.total_env_steps:
+            remaining_vector_steps = (
+                training.total_env_steps - global_step
+            ) // training.parallel_envs
+            horizon = min(training.rollout_length, remaining_vector_steps)
+            buffer = RolloutBuffer(horizon, training.parallel_envs)
+            for _ in range(horizon):
+                actions, log_probabilities, values = learner.act(
+                    observations, states, active_masks
+                )
+                result = environments.step(actions)
+                buffer.insert(
+                    observations,
+                    states,
+                    actions,
+                    log_probabilities,
+                    values,
+                    result.rewards,
+                    result.dones,
+                    active_masks,
+                )
+                global_step += training.parallel_envs
+                for info in result.infos:
+                    if "episode_summary" not in info:
+                        continue
+                    episode_index += 1
+                    summary = dict(info["episode_summary"])
+                    recent_episodes.append(summary)
+                    _write_episode(
+                        csv_writer,
+                        csv_stream,
+                        summary,
+                        global_step,
+                        episode_index,
+                    )
+                    for key in CSV_FIELDS[2:]:
+                        if key == "result":
+                            continue
+                        tensorboard.add_scalar(
+                            f"episode/{key}", float(summary[key]), global_step
+                        )
+                    tensorboard.add_scalar(
+                        "episode/win", float(summary["result"] == "win"), global_step
+                    )
+                    tensorboard.add_scalar(
+                        "episode/draw", float(summary["result"] == "draw"), global_step
+                    )
+                    tensorboard.add_scalar(
+                        "episode/loss", float(summary["result"] == "loss"), global_step
+                    )
+                observations = result.observations
+                states = result.states
+                active_masks = result.active_masks
+
+            last_values = learner.values(states)
+            buffer.compute_returns_and_advantages(
+                last_values, config.mappo.gamma, config.mappo.gae_lambda
+            )
+            last_metrics = learner.update(buffer)
+            for key, value in last_metrics.items():
+                tensorboard.add_scalar(f"update/{key}", value, global_step)
+
+            if global_step >= next_log:
+                print(
+                    _training_log(
+                        global_step, episode_index, recent_episodes, last_metrics
                     ),
+                    flush=True,
                 )
-            )
-            indices = list(range(len(batch_episodes)))
-            training_teams = [int((episode + config.seed) % 2) for episode in batch_episodes]
-            use_rule = [
-                episode <= config.training.rule_opponent_episodes
-                for episode in batch_episodes
-            ]
-            if not all(use_rule):
-                snapshot = snapshots[int(sampling_rng.integers(0, len(snapshots)))]
-                opponent_policy.load_actor_snapshot(snapshot)
+                while next_log <= global_step:
+                    next_log += training.log_interval_steps
 
-            sample_started = time.perf_counter()
-            reset_results = parallel_envs.reset(
-                indices,
-                [config.seed + episode for episode in batch_episodes],
-                training_teams,
-            )
-            observations = {index: reset_results[index][0] for index in indices}
-            infos = {index: reset_results[index][1] for index in indices}
-            actor_hidden = {
-                index: learner.initial_actor_hidden() for index in indices
-            }
-            critic_hidden = {
-                index: learner.initial_critic_hidden() for index in indices
-            }
-            opponent_hidden = {
-                index: opponent_policy.initial_actor_hidden() for index in indices
-            }
-            buffers = {
-                index: EpisodeBuffer(config.mappo.hidden_size, n_agents)
-                for index in indices
-            }
-            episode_returns = {index: 0.0 for index in indices}
-            active_indices = set(indices)
-
-            while active_indices:
-                step_indices = sorted(active_indices)
-                learner_observations = np.stack(
-                    [observations[index][training_teams[index]] for index in step_indices]
+            if global_step >= next_evaluation:
+                evaluation = evaluate_policy(
+                    config,
+                    learner,
+                    episodes=training.evaluation_episodes,
+                    seed_start=config.seed + 1_000_000,
                 )
-                learner_states = np.stack(
-                    [infos[index]["states"][training_teams[index]] for index in step_indices]
+                for key, value in evaluation.items():
+                    tensorboard.add_scalar(f"evaluation/{key}", value, global_step)
+                print(
+                    f"[EVAL] step={global_step} W/D/L="
+                    f"{evaluation['win_rate']:.1%}/{evaluation['draw_rate']:.1%}/"
+                    f"{evaluation['loss_rate']:.1%} return={evaluation['mean_return']:.3f} "
+                    f"alive_diff={evaluation['survival_difference']:.3f}",
+                    flush=True,
                 )
-                learner_masks = np.stack(
-                    [infos[index]["active_masks"][training_teams[index]] for index in step_indices]
-                )
-                batched_actions, batched_log_probabilities, batched_values, batched_actor_h, batched_critic_h = learner.act_batch(
-                    learner_observations,
-                    learner_states,
-                    np.stack([actor_hidden[index] for index in step_indices]),
-                    np.stack([critic_hidden[index] for index in step_indices]),
-                    learner_masks,
-                )
+                if _is_better_evaluation(evaluation, best_evaluation):
+                    best_evaluation = evaluation
+                    learner.save(
+                        checkpoint_dir / "best.pt",
+                        global_step=global_step,
+                        extra={
+                            "episode_index": episode_index,
+                            "best_evaluation": best_evaluation,
+                        },
+                    )
+                while next_evaluation <= global_step:
+                    next_evaluation += training.evaluation_interval_steps
 
-                opponent_actions_by_index: dict[int, np.ndarray | None] = {
-                    index: None for index in step_indices
-                }
-                selfplay_indices = [index for index in step_indices if not use_rule[index]]
-                if selfplay_indices:
-                    selfplay_observations = np.stack(
-                        [observations[index][1 - training_teams[index]] for index in selfplay_indices]
-                    )
-                    selfplay_masks = np.stack(
-                        [infos[index]["active_masks"][1 - training_teams[index]] for index in selfplay_indices]
-                    )
-                    selfplay_actions, next_selfplay_hidden = opponent_policy.act_policy_batch(
-                        selfplay_observations,
-                        np.stack([opponent_hidden[index] for index in selfplay_indices]),
-                        selfplay_masks,
-                        deterministic=False,
-                    )
-                    for position, index in enumerate(selfplay_indices):
-                        opponent_actions_by_index[index] = selfplay_actions[position]
-                        opponent_hidden[index] = next_selfplay_hidden[position]
-
-                pending: dict[
-                    int,
-                    tuple[
-                        np.ndarray,
-                        np.ndarray,
-                        float,
-                        np.ndarray,
-                        np.ndarray,
-                        np.ndarray,
-                        np.ndarray,
-                    ],
-                ] = {}
-                for position, index in enumerate(step_indices):
-                    team = training_teams[index]
-                    pending[index] = (
-                        learner_states[position],
-                        batched_actions[position],
-                        float(batched_values[position]),
-                        batched_log_probabilities[position],
-                        batched_actor_h[position],
-                        batched_critic_h[position],
-                        learner_masks[position],
-                    )
-
-                step_results = parallel_envs.step(
-                    step_indices,
-                    [batched_actions[position] for position in range(len(step_indices))],
-                    [opponent_actions_by_index[index] for index in step_indices],
-                )
-                for index in step_indices:
-                    next_observation, rewards, terminated, truncated, next_info = (
-                        step_results[index]
-                    )
-                    team = training_teams[index]
-                    (
-                        state,
-                        action,
-                        value,
-                        log_probability,
-                        next_actor_h,
-                        next_critic_h,
-                        active_mask,
-                    ) = pending[index]
-                    team_reward = float(np.mean(rewards[team]))
-                    done = terminated or truncated
-                    buffers[index].append(
-                        observation=observations[index][team],
-                        state=state,
-                        action=action,
-                        log_probability=log_probability,
-                        value=value,
-                        reward=team_reward,
-                        done=done,
-                        active_mask=active_mask,
-                    )
-                    episode_returns[index] += team_reward
-                    observations[index] = next_observation
-                    infos[index] = next_info
-                    actor_hidden[index] = next_actor_h
-                    critic_hidden[index] = next_critic_h
-                    if done:
-                        active_indices.remove(index)
-
-            sample_seconds = time.perf_counter() - sample_started
-            update_started = time.perf_counter()
-            update_metrics = learner.update_many(
-                [buffers[index] for index in indices]
-            )
-            update_seconds = time.perf_counter() - update_started
-            batch_steps = sum(len(buffers[index]) for index in indices)
-            total_environment_steps += batch_steps
-
-            for index, episode in enumerate(batch_episodes):
-                team = training_teams[index]
-                opponent_team = 1 - team
-                info = infos[index]
-                episode_return = episode_returns[index]
-                win = float(info["winner"] == team)
-                recent_returns.append(episode_return)
-                recent_wins.append(win)
-                writer.add_scalar("train/episode_return", episode_return, episode)
-                writer.add_scalar("train/win", win, episode)
-                writer.add_scalar("train/episode_length", len(buffers[index]), episode)
-                writer.add_scalar("train/alive_own", info["alive"][team], episode)
-                writer.add_scalar(
-                    "train/alive_enemy", info["alive"][opponent_team], episode
-                )
-                should_log = (
-                    episode == start_episode
-                    or episode == config.training.episodes
-                    or episode % config.training.log_interval == 0
-                )
-                if should_log:
-                    elapsed = max(time.perf_counter() - training_started, 1e-6)
-                    completed = episode - start_episode + 1
-                    rate = completed / elapsed
-                    remaining = max(config.training.episodes - episode, 0)
-                    winner = info["winner"]
-                    result = (
-                        "D" if winner is None else ("W" if winner == team else "L")
-                    )
-                    print(
-                        _progress_line(
-                            episode=episode,
-                            total_episodes=config.training.episodes,
-                            stage="rule" if use_rule[index] else "selfplay",
-                            result=result,
-                            episode_return=episode_return,
-                            mean_return=float(np.mean(recent_returns)),
-                            win_rate=float(np.mean(recent_wins)),
-                            length=len(buffers[index]),
-                            alive=info["alive"],
-                            kills=info["kills"],
-                            steps_per_second=total_environment_steps / elapsed,
-                            eta_seconds=remaining / max(rate, 1e-9),
-                            sample_seconds=sample_seconds,
-                            update_seconds=update_seconds,
-                        ),
-                        flush=True,
-                    )
-
-            batch_end = batch_episodes[-1]
-            batch_start = batch_episodes[0]
-            for key, value in update_metrics.items():
-                writer.add_scalar(f"loss/{key}", value, batch_end)
-
-            if (
-                batch_end // config.training.snapshot_interval
-                > (batch_start - 1) // config.training.snapshot_interval
-            ):
-                snapshots.append(learner.actor_snapshot())
-            if (
-                batch_end // config.training.checkpoint_interval
-                > (batch_start - 1) // config.training.checkpoint_interval
-            ):
-                last_checkpoint = checkpoint_dir / f"episode_{batch_end:06d}.pt"
+            if global_step >= next_checkpoint:
                 learner.save(
-                    last_checkpoint,
-                    episode=batch_end,
-                    extra={"mean_return_100": float(np.mean(recent_returns)), "device": device},
+                    checkpoint_dir / f"step_{global_step:09d}.pt",
+                    global_step=global_step,
+                    extra={
+                        "episode_index": episode_index,
+                        "best_evaluation": best_evaluation,
+                    },
                 )
-            episode_cursor = batch_end + 1
+                while next_checkpoint <= global_step:
+                    next_checkpoint += training.checkpoint_interval_steps
 
-        last_checkpoint = checkpoint_dir / "final.pt"
-        learner.save(last_checkpoint, episode=config.training.episodes, extra={"device": device})
+        final_path = checkpoint_dir / "final.pt"
+        learner.save(
+            final_path,
+            global_step=global_step,
+            extra={
+                "episode_index": episode_index,
+                "best_evaluation": best_evaluation,
+            },
+        )
+        return final_path
     finally:
-        writer.close()
-        parallel_envs.close()
-    return last_checkpoint
+        csv_stream.close()
+        tensorboard.close()
+        environments.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train recurrent MAPPO in the UAV combat environment")
+    parser = argparse.ArgumentParser(
+        description="Train fixed 3v3 red MAPPO against scripted blue"
+    )
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--resume", default=None)
-    parser.add_argument("--episodes", type=int, default=None)
+    parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -376,8 +315,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
-    if args.episodes is not None:
-        config.training.episodes = args.episodes
+    if args.steps is not None:
+        config.training.total_env_steps = args.steps
     if args.output is not None:
         config.training.output_dir = args.output
     if args.device is not None:

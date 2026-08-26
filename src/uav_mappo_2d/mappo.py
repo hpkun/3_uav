@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -10,45 +8,85 @@ import torch
 from torch import nn
 
 from .config import MAPPOConfig
-from .models import RecurrentActor, RecurrentCritic
+from .models import CentralizedCritic, GaussianActor
 
 
-@dataclass
-class EpisodeBuffer:
-    actor_hidden_size: int
-    n_agents: int
-    observations: list[np.ndarray] = field(default_factory=list)
-    states: list[np.ndarray] = field(default_factory=list)
-    actions: list[np.ndarray] = field(default_factory=list)
-    log_probabilities: list[np.ndarray] = field(default_factory=list)
-    values: list[float] = field(default_factory=list)
-    rewards: list[float] = field(default_factory=list)
-    dones: list[float] = field(default_factory=list)
-    active_masks: list[np.ndarray] = field(default_factory=list)
+class RolloutBuffer:
+    """Fixed [time, environment] on-policy rollout storage."""
 
-    def append(
+    def __init__(
         self,
-        *,
-        observation: np.ndarray,
-        state: np.ndarray,
-        action: np.ndarray,
-        log_probability: np.ndarray,
-        value: float,
-        reward: float,
-        done: bool,
-        active_mask: np.ndarray,
+        horizon: int,
+        num_envs: int,
+        num_agents: int = 3,
+        observation_dim: int = 40,
+        state_dim: int = 36,
     ) -> None:
-        self.observations.append(np.asarray(observation, dtype=np.float32).copy())
-        self.states.append(np.asarray(state, dtype=np.float32).copy())
-        self.actions.append(np.asarray(action, dtype=np.float32).copy())
-        self.log_probabilities.append(np.asarray(log_probability, dtype=np.float32).copy())
-        self.values.append(float(value))
-        self.rewards.append(float(reward))
-        self.dones.append(float(done))
-        self.active_masks.append(np.asarray(active_mask, dtype=np.float32).copy())
+        self.horizon = int(horizon)
+        self.num_envs = int(num_envs)
+        self.num_agents = int(num_agents)
+        shape = (self.horizon, self.num_envs)
+        self.observations = np.zeros(
+            shape + (num_agents, observation_dim), dtype=np.float32
+        )
+        self.states = np.zeros(shape + (state_dim,), dtype=np.float32)
+        self.actions = np.zeros(shape + (num_agents, 2), dtype=np.float32)
+        self.old_log_probabilities = np.zeros(
+            shape + (num_agents,), dtype=np.float32
+        )
+        self.values = np.zeros(shape, dtype=np.float32)
+        self.rewards = np.zeros(shape, dtype=np.float32)
+        self.dones = np.zeros(shape, dtype=np.float32)
+        self.active_masks = np.zeros(shape + (num_agents,), dtype=np.float32)
+        self.advantages = np.zeros(shape, dtype=np.float32)
+        self.returns = np.zeros(shape, dtype=np.float32)
+        self.position = 0
 
-    def __len__(self) -> int:
-        return len(self.rewards)
+    def insert(
+        self,
+        observations: np.ndarray,
+        states: np.ndarray,
+        actions: np.ndarray,
+        log_probabilities: np.ndarray,
+        values: np.ndarray,
+        rewards: np.ndarray,
+        dones: np.ndarray,
+        active_masks: np.ndarray,
+    ) -> None:
+        if self.position >= self.horizon:
+            raise RuntimeError("rollout buffer is full")
+        index = self.position
+        self.observations[index] = observations
+        self.states[index] = states
+        self.actions[index] = actions
+        self.old_log_probabilities[index] = log_probabilities
+        self.values[index] = values
+        self.rewards[index] = rewards
+        self.dones[index] = dones
+        self.active_masks[index] = active_masks
+        self.position += 1
+
+    def compute_returns_and_advantages(
+        self,
+        last_values: np.ndarray,
+        gamma: float,
+        gae_lambda: float,
+    ) -> None:
+        if self.position != self.horizon:
+            raise RuntimeError("GAE requires a complete rollout")
+        next_values = np.asarray(last_values, dtype=np.float32)
+        gae = np.zeros(self.num_envs, dtype=np.float32)
+        for timestep in reversed(range(self.horizon)):
+            continuation = 1.0 - self.dones[timestep]
+            delta = (
+                self.rewards[timestep]
+                + gamma * next_values * continuation
+                - self.values[timestep]
+            )
+            gae = delta + gamma * gae_lambda * continuation * gae
+            self.advantages[timestep] = gae
+            next_values = self.values[timestep]
+        self.returns[:] = self.advantages + self.values
 
 
 class MAPPO:
@@ -58,353 +96,222 @@ class MAPPO:
         state_dim: int,
         n_agents: int,
         config: MAPPOConfig,
-        device: str | torch.device = "cpu",
+        device: str | torch.device,
+        seed: int = 0,
     ) -> None:
         self.config = config
         self.device = torch.device(device)
         self.n_agents = n_agents
-        self.actor = RecurrentActor(observation_dim, 2, config.hidden_size).to(self.device)
-        self.critic = RecurrentCritic(state_dim, config.hidden_size).to(self.device)
-        self.optimizer = torch.optim.Adam(
-            list(self.actor.parameters()) + list(self.critic.parameters()),
-            lr=config.learning_rate,
-            eps=1e-5,
+        self.rng = np.random.default_rng(seed)
+        self.actor = GaussianActor(observation_dim, config.hidden_size).to(self.device)
+        self.critic = CentralizedCritic(state_dim, config.hidden_size).to(self.device)
+        self.actor_optimizer = torch.optim.Adam(
+            self.actor.parameters(), lr=config.actor_learning_rate, eps=1e-5
         )
-
-    def initial_actor_hidden(self) -> np.ndarray:
-        return np.zeros((self.n_agents, self.config.hidden_size), dtype=np.float32)
-
-    def initial_critic_hidden(self) -> np.ndarray:
-        return np.zeros((1, self.config.hidden_size), dtype=np.float32)
+        self.critic_optimizer = torch.optim.Adam(
+            self.critic.parameters(), lr=config.critic_learning_rate, eps=1e-5
+        )
 
     @torch.no_grad()
     def act(
         self,
-        observation: np.ndarray,
-        state: np.ndarray,
-        actor_hidden: np.ndarray,
-        critic_hidden: np.ndarray,
-        active_mask: np.ndarray,
-        *,
-        deterministic: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray]:
-        action, log_probability, value, next_actor_h, next_critic_h = self.act_batch(
-            observation[None],
-            state[None],
-            actor_hidden[None],
-            critic_hidden[None],
-            active_mask[None],
-            deterministic=deterministic,
-        )
-        return (
-            action[0],
-            log_probability[0],
-            float(value[0]),
-            next_actor_h[0],
-            next_critic_h[0],
-        )
-
-    @torch.no_grad()
-    def act_batch(
-        self,
         observations: np.ndarray,
         states: np.ndarray,
-        actor_hidden: np.ndarray,
-        critic_hidden: np.ndarray,
         active_masks: np.ndarray,
         *,
         deterministic: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Infer actions and values for all environments in one device batch."""
-        env_count, agent_count, observation_dim = observations.shape
-        obs_t = torch.as_tensor(
-            observations.reshape(env_count * agent_count, observation_dim),
-            device=self.device,
-            dtype=torch.float32,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        observations_t = torch.as_tensor(
+            observations, device=self.device, dtype=torch.float32
         )
-        state_t = torch.as_tensor(states, device=self.device, dtype=torch.float32)
-        actor_h = torch.as_tensor(
-            actor_hidden.reshape(env_count * agent_count, -1),
-            device=self.device,
-            dtype=torch.float32,
+        states_t = torch.as_tensor(states, device=self.device, dtype=torch.float32)
+        masks_t = torch.as_tensor(
+            active_masks, device=self.device, dtype=torch.float32
         )
-        critic_h = torch.as_tensor(
-            critic_hidden[:, 0], device=self.device, dtype=torch.float32
+        actions, log_probabilities = self.actor.sample(
+            observations_t, deterministic=deterministic
         )
-        mask_t = torch.as_tensor(
-            active_masks.reshape(env_count * agent_count, 1),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        action, log_probability, next_actor_h = self.actor.act(
-            obs_t, actor_h, mask_t, deterministic=deterministic
-        )
-        value, next_critic_h = self.critic(
-            state_t, critic_h, torch.ones((env_count, 1), device=self.device)
-        )
-        action = action * mask_t
+        actions = actions * masks_t[..., None]
+        log_probabilities = log_probabilities * masks_t
+        values = self.critic(states_t)
         return (
-            action.reshape(env_count, agent_count, -1).cpu().numpy(),
-            log_probability.reshape(env_count, agent_count).cpu().numpy(),
-            value.cpu().numpy(),
-            next_actor_h.reshape(env_count, agent_count, -1).cpu().numpy(),
-            next_critic_h[:, None].cpu().numpy(),
+            actions.cpu().numpy(),
+            log_probabilities.cpu().numpy(),
+            values.cpu().numpy(),
         )
 
     @torch.no_grad()
-    def act_policy(
-        self,
-        observation: np.ndarray,
-        actor_hidden: np.ndarray,
-        active_mask: np.ndarray,
-        *,
-        deterministic: bool = True,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        action, next_hidden = self.act_policy_batch(
-            observation[None],
-            actor_hidden[None],
-            active_mask[None],
-            deterministic=deterministic,
-        )
-        return action[0], next_hidden[0]
-
-    @torch.no_grad()
-    def act_policy_batch(
+    def policy_actions(
         self,
         observations: np.ndarray,
-        actor_hidden: np.ndarray,
         active_masks: np.ndarray,
         *,
         deterministic: bool = True,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        env_count, agent_count, observation_dim = observations.shape
-        obs_t = torch.as_tensor(
-            observations.reshape(env_count * agent_count, observation_dim),
-            device=self.device,
-            dtype=torch.float32,
+    ) -> np.ndarray:
+        observations_t = torch.as_tensor(
+            observations, device=self.device, dtype=torch.float32
         )
-        hidden_t = torch.as_tensor(
-            actor_hidden.reshape(env_count * agent_count, -1),
-            device=self.device,
-            dtype=torch.float32,
+        masks_t = torch.as_tensor(
+            active_masks, device=self.device, dtype=torch.float32
         )
-        mask_t = torch.as_tensor(
-            active_masks.reshape(env_count * agent_count, 1),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        action, _, next_hidden = self.actor.act(
-            obs_t, hidden_t, mask_t, deterministic=deterministic
-        )
-        return (
-            (action * mask_t).reshape(env_count, agent_count, -1).cpu().numpy(),
-            next_hidden.reshape(env_count, agent_count, -1).cpu().numpy(),
-        )
+        actions, _ = self.actor.sample(observations_t, deterministic=deterministic)
+        return (actions * masks_t[..., None]).cpu().numpy()
 
-    def update(self, buffer: EpisodeBuffer) -> dict[str, float]:
-        return self.update_many([buffer])
+    @torch.no_grad()
+    def values(self, states: np.ndarray) -> np.ndarray:
+        states_t = torch.as_tensor(states, device=self.device, dtype=torch.float32)
+        return self.critic(states_t).cpu().numpy()
 
-    def update_many(self, buffers: list[EpisodeBuffer]) -> dict[str, float]:
-        """Update from padded recurrent episodes batched across environments."""
-        if not buffers or any(len(buffer) == 0 for buffer in buffers):
-            raise ValueError("Cannot update from an empty episode buffer batch")
+    def update(self, buffer: RolloutBuffer) -> dict[str, float]:
         cfg = self.config
-        env_count = len(buffers)
-        max_length = max(len(buffer) for buffer in buffers)
-        observation_dim = buffers[0].observations[0].shape[-1]
-        state_dim = buffers[0].states[0].shape[-1]
-        action_dim = buffers[0].actions[0].shape[-1]
-
-        observations_np = np.zeros(
-            (max_length, env_count, self.n_agents, observation_dim), np.float32
-        )
-        states_np = np.zeros((max_length, env_count, state_dim), np.float32)
-        actions_np = np.zeros(
-            (max_length, env_count, self.n_agents, action_dim), np.float32
-        )
-        old_log_probabilities_np = np.zeros(
-            (max_length, env_count, self.n_agents), np.float32
-        )
-        old_values_np = np.zeros((max_length, env_count), np.float32)
-        active_masks_np = np.zeros(
-            (max_length, env_count, self.n_agents), np.float32
-        )
-        advantages_np = np.zeros(
-            (max_length, env_count, self.n_agents), np.float32
-        )
-        returns_np = np.zeros((max_length, env_count), np.float32)
-        valid_steps_np = np.zeros((max_length, env_count), np.float32)
-
-        for env_index, buffer in enumerate(buffers):
-            length = len(buffer)
-            advantages, returns = self._gae(buffer)
-            observations_np[:length, env_index] = np.stack(buffer.observations)
-            states_np[:length, env_index] = np.stack(buffer.states)
-            actions_np[:length, env_index] = np.stack(buffer.actions)
-            old_log_probabilities_np[:length, env_index] = np.stack(
-                buffer.log_probabilities
-            )
-            old_values_np[:length, env_index] = buffer.values
-            active_masks_np[:length, env_index] = np.stack(buffer.active_masks)
-            advantages_np[:length, env_index] = advantages[:, None]
-            returns_np[:length, env_index] = returns
-            valid_steps_np[:length, env_index] = 1.0
-
         to_tensor = lambda value: torch.as_tensor(
             value, device=self.device, dtype=torch.float32
         )
-        observations = to_tensor(observations_np)
-        states = to_tensor(states_np)
-        actions = to_tensor(actions_np)
-        old_log_probabilities = to_tensor(old_log_probabilities_np)
-        old_values = to_tensor(old_values_np)
-        active_masks = to_tensor(active_masks_np)
-        advantages = to_tensor(advantages_np)
-        returns = to_tensor(returns_np)
-        valid_steps = to_tensor(valid_steps_np)
+        observations = to_tensor(buffer.observations)
+        states = to_tensor(buffer.states)
+        actions = to_tensor(buffer.actions)
+        old_log_probabilities = to_tensor(buffer.old_log_probabilities)
+        old_values = to_tensor(buffer.values)
+        returns = to_tensor(buffer.returns)
+        active_masks = to_tensor(buffer.active_masks)
+        team_advantages = to_tensor(buffer.advantages)
 
-        all_valid_advantages = advantages[active_masks > 0.0]
-        advantage_mean = all_valid_advantages.mean()
-        advantage_std = all_valid_advantages.std(unbiased=False)
-        advantages = (advantages - advantage_mean) / (advantage_std + 1e-8)
-        actor_count = active_masks.sum().clamp_min(1.0)
-        value_count = valid_steps.sum().clamp_min(1.0)
+        actor_advantages = team_advantages[..., None].expand(-1, -1, self.n_agents)
+        valid_advantages = actor_advantages[active_masks > 0.5]
+        actor_advantages = (
+            actor_advantages - valid_advantages.mean()
+        ) / valid_advantages.std(unbiased=False).clamp_min(1e-8)
 
-        metrics: dict[str, float] = {}
-        for _ in range(cfg.update_epochs):
-            actor_hidden = torch.zeros(
-                (env_count, self.n_agents, cfg.hidden_size), device=self.device
-            )
-            critic_hidden = torch.zeros(
-                (env_count, cfg.hidden_size), device=self.device
-            )
-            new_log_probabilities = []
-            entropies = []
-            new_values = []
-            for timestep in range(max_length):
-                actor_mask = active_masks[timestep, :, :, None]
-                log_probability, entropy, next_actor_hidden = (
-                    self.actor.evaluate_actions(
-                        observations[timestep].reshape(
-                            env_count * self.n_agents, observation_dim
-                        ),
-                        actions[timestep].reshape(
-                            env_count * self.n_agents, action_dim
-                        ),
-                        actor_hidden.reshape(
-                            env_count * self.n_agents, cfg.hidden_size
-                        ),
-                        actor_mask.reshape(env_count * self.n_agents, 1),
-                    )
-                )
-                actor_hidden = next_actor_hidden.reshape(
-                    env_count, self.n_agents, cfg.hidden_size
-                )
-                value, critic_hidden = self.critic(
-                    states[timestep],
-                    critic_hidden,
-                    valid_steps[timestep, :, None],
-                )
-                new_log_probabilities.append(
-                    log_probability.reshape(env_count, self.n_agents)
-                )
-                entropies.append(entropy.reshape(env_count, self.n_agents))
-                new_values.append(value)
-
-            new_log_probabilities_t = torch.stack(new_log_probabilities)
-            entropies_t = torch.stack(entropies)
-            new_values_t = torch.stack(new_values)
-            ratio = torch.exp(new_log_probabilities_t - old_log_probabilities)
-            unclipped = ratio * advantages
-            clipped = torch.clamp(
-                ratio, 1.0 - cfg.clip_ratio, 1.0 + cfg.clip_ratio
-            ) * advantages
-            policy_loss = -(
-                torch.minimum(unclipped, clipped) * active_masks
-            ).sum() / actor_count
-            entropy = (entropies_t * active_masks).sum() / actor_count
-            approximate_kl = (
-                (old_log_probabilities - new_log_probabilities_t) * active_masks
-            ).sum() / actor_count
-
-            value_clipped = old_values + (new_values_t - old_values).clamp(
-                -cfg.value_clip, cfg.value_clip
-            )
-            value_loss_unclipped = (new_values_t - returns).pow(2)
-            value_loss_clipped = (value_clipped - returns).pow(2)
-            value_loss = 0.5 * (
-                torch.maximum(value_loss_unclipped, value_loss_clipped)
-                * valid_steps
-            ).sum() / value_count
-
-            total_loss = (
-                policy_loss
-                + cfg.value_coefficient * value_loss
-                - cfg.entropy_coefficient * entropy
-            )
-            self.optimizer.zero_grad(set_to_none=True)
-            total_loss.backward()
-            gradient_norm = nn.utils.clip_grad_norm_(
-                list(self.actor.parameters()) + list(self.critic.parameters()),
-                cfg.max_grad_norm,
-            )
-            self.optimizer.step()
-            metrics = {
-                "policy_loss": float(policy_loss.detach().cpu()),
-                "value_loss": float(value_loss.detach().cpu()),
-                "entropy": float(entropy.detach().cpu()),
-                "gradient_norm": float(gradient_norm.detach().cpu()),
-                "approx_kl": float(approximate_kl.detach().cpu()),
-                "episodes_per_update": float(len(buffers)),
-            }
-        return metrics
-
-    def _gae(self, buffer: EpisodeBuffer) -> tuple[np.ndarray, np.ndarray]:
-        cfg = self.config
-        values = np.asarray(buffer.values, dtype=np.float32)
-        rewards = np.asarray(buffer.rewards, dtype=np.float32)
-        dones = np.asarray(buffer.dones, dtype=np.float32)
-        advantages = np.zeros_like(rewards)
-        gae = 0.0
-        next_value = 0.0
-        for timestep in reversed(range(len(buffer))):
-            continuation = 1.0 - dones[timestep]
-            delta = (
-                rewards[timestep]
-                + cfg.gamma * next_value * continuation
-                - values[timestep]
-            )
-            gae = delta + cfg.gamma * cfg.gae_lambda * continuation * gae
-            advantages[timestep] = gae
-            next_value = values[timestep]
-        return advantages, advantages + values
-
-    def actor_snapshot(self) -> OrderedDict[str, torch.Tensor]:
-        return OrderedDict(
-            (key, value.detach().cpu().clone()) for key, value in self.actor.state_dict().items()
+        transition_count = buffer.horizon * buffer.num_envs
+        observations = observations.reshape(
+            transition_count, self.n_agents, observations.shape[-1]
+        )
+        states = states.reshape(transition_count, states.shape[-1])
+        actions = actions.reshape(transition_count, self.n_agents, 2)
+        old_log_probabilities = old_log_probabilities.reshape(
+            transition_count, self.n_agents
+        )
+        old_values = old_values.reshape(transition_count)
+        returns = returns.reshape(transition_count)
+        active_masks = active_masks.reshape(transition_count, self.n_agents)
+        actor_advantages = actor_advantages.reshape(
+            transition_count, self.n_agents
         )
 
-    def load_actor_snapshot(self, state: OrderedDict[str, torch.Tensor]) -> None:
-        self.actor.load_state_dict(state)
+        rows: list[dict[str, float]] = []
+        for _ in range(cfg.update_epochs):
+            order = self.rng.permutation(transition_count)
+            for start in range(0, transition_count, cfg.minibatch_size):
+                indices = torch.as_tensor(
+                    order[start : start + cfg.minibatch_size],
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                obs_batch = observations[indices]
+                action_batch = actions[indices]
+                old_log_batch = old_log_probabilities[indices]
+                mask_batch = active_masks[indices]
+                advantage_batch = actor_advantages[indices]
 
-    def save(self, path: str | Path, *, episode: int, extra: dict[str, Any] | None = None) -> None:
+                new_log_probability, entropy = self.actor.evaluate_actions(
+                    obs_batch, action_batch
+                )
+                log_ratio = new_log_probability - old_log_batch
+                ratio = log_ratio.exp()
+                unclipped = ratio * advantage_batch
+                clipped = ratio.clamp(
+                    1.0 - cfg.clip_ratio, 1.0 + cfg.clip_ratio
+                ) * advantage_batch
+                actor_count = mask_batch.sum().clamp_min(1.0)
+                actor_loss = -(
+                    torch.minimum(unclipped, clipped) * mask_batch
+                ).sum() / actor_count
+                entropy_mean = (entropy * mask_batch).sum() / actor_count
+
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                (actor_loss - cfg.entropy_coefficient * entropy_mean).backward()
+                actor_grad_norm = nn.utils.clip_grad_norm_(
+                    self.actor.parameters(), cfg.max_grad_norm
+                )
+                self.actor_optimizer.step()
+
+                state_batch = states[indices]
+                return_batch = returns[indices]
+                old_value_batch = old_values[indices]
+                values = self.critic(state_batch)
+                clipped_values = old_value_batch + (values - old_value_batch).clamp(
+                    -cfg.value_clip, cfg.value_clip
+                )
+                critic_loss = 0.5 * torch.maximum(
+                    (values - return_batch).square(),
+                    (clipped_values - return_batch).square(),
+                ).mean()
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                (cfg.value_coefficient * critic_loss).backward()
+                critic_grad_norm = nn.utils.clip_grad_norm_(
+                    self.critic.parameters(), cfg.max_grad_norm
+                )
+                self.critic_optimizer.step()
+
+                with torch.no_grad():
+                    approx_kl = (
+                        ((ratio - 1.0) - log_ratio) * mask_batch
+                    ).sum() / actor_count
+                    clip_fraction = (
+                        ((ratio - 1.0).abs() > cfg.clip_ratio).float() * mask_batch
+                    ).sum() / actor_count
+                rows.append(
+                    {
+                        "actor_loss": float(actor_loss.detach().cpu()),
+                        "critic_loss": float(critic_loss.detach().cpu()),
+                        "entropy": float(entropy_mean.detach().cpu()),
+                        "approx_kl": float(approx_kl.detach().cpu()),
+                        "clip_fraction": float(clip_fraction.detach().cpu()),
+                        "actor_grad_norm": float(actor_grad_norm.detach().cpu()),
+                        "critic_grad_norm": float(critic_grad_norm.detach().cpu()),
+                    }
+                )
+
+        return_values = returns.detach()
+        old_value_values = old_values.detach()
+        return_variance = torch.var(return_values, unbiased=False)
+        explained_variance = 1.0 - torch.var(
+            return_values - old_value_values, unbiased=False
+        ) / return_variance.clamp_min(1e-8)
+        metrics = {
+            key: float(np.mean([row[key] for row in rows])) for key in rows[0]
+        }
+        metrics["explained_variance"] = float(explained_variance.cpu())
+        if not np.all(np.isfinite(list(metrics.values()))):
+            raise FloatingPointError(f"Non-finite MAPPO metrics: {metrics}")
+        return metrics
+
+    def save(
+        self,
+        path: str | Path,
+        *,
+        global_step: int,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         output = Path(path)
         output.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "episode": episode,
+                "global_step": int(global_step),
                 "actor": self.actor.state_dict(),
                 "critic": self.critic.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
+                "actor_optimizer": self.actor_optimizer.state_dict(),
+                "critic_optimizer": self.critic_optimizer.state_dict(),
                 "extra": extra or {},
             },
             output,
         )
 
-    def load(self, path: str | Path, *, load_optimizer: bool = True) -> dict[str, Any]:
+    def load(self, path: str | Path, *, load_optimizers: bool = True) -> dict[str, Any]:
         checkpoint = torch.load(Path(path), map_location=self.device, weights_only=False)
         self.actor.load_state_dict(checkpoint["actor"])
         self.critic.load_state_dict(checkpoint["critic"])
-        if load_optimizer and "optimizer" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if load_optimizers:
+            self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+            self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
         return checkpoint

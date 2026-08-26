@@ -1,20 +1,17 @@
 seed: 11
 
-environment:
-  agents_per_team: 2
-  episode_seconds: 10.0
-
 mappo:
   hidden_size: 64
-  update_epochs: 1
+  update_epochs: 2
+  minibatch_size: 32
 
 training:
-  episodes: 3
+  total_env_steps: 128
   parallel_envs: 2
-  rule_opponent_episodes: 2
-  snapshot_interval: 1
-  snapshot_pool_size: 2
-  checkpoint_interval: 1
-  log_interval: 1
-  output_dir: "runs/smoke"
+  rollout_length: 16
+  log_interval_steps: 32
+  checkpoint_interval_steps: 64
+  evaluation_interval_steps: 64
+  evaluation_episodes: 4
+  output_dir: "runs/smoke_fixed_3v3"
   device: "cpu"

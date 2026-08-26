@@ -1,103 +1,157 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 
 import numpy as np
 
 from uav_mappo_2d.config import EnvironmentConfig, RenderConfig, RewardConfig
 from uav_mappo_2d.env import UAVCombatEnv
-from uav_mappo_2d.opponents import RuleBasedOpponent
 
 
-def make_env(**overrides) -> UAVCombatEnv:
-    config = replace(
-        EnvironmentConfig(),
-        agents_per_team=overrides.pop("agents_per_team", 2),
-        episode_seconds=overrides.pop("episode_seconds", 10.0),
-        **overrides,
+def make_env(**overrides: float | int) -> UAVCombatEnv:
+    return UAVCombatEnv(
+        replace(EnvironmentConfig(), **overrides),
+        RewardConfig(),
+        RenderConfig(width=320, height=320),
     )
-    return UAVCombatEnv(config, RewardConfig(), RenderConfig(width=320, height=320))
 
 
-def test_reset_is_seeded_and_spaces_match() -> None:
-    env = make_env(agents_per_team=3)
-    first, first_info = env.reset(seed=17)
-    positions = env.positions.copy()
-    second, second_info = env.reset(seed=17)
+def put_pair(
+    env: UAVCombatEnv,
+    attacker_position: tuple[float, float],
+    target_position: tuple[float, float],
+    attacker_heading: float,
+    target_heading: float,
+) -> None:
+    env.positions[0, 0] = attacker_position
+    env.positions[1, 0] = target_position
+    env.headings[0, 0] = attacker_heading
+    env.headings[1, 0] = target_heading
+    env.speeds[:, 0] = 200.0
 
-    assert first.shape == env.observation_space.shape
-    assert env.action_space.shape == (2, 3, 2)
-    assert env.global_state(0).shape == (env.state_dim,)
-    np.testing.assert_allclose(first, second)
-    np.testing.assert_allclose(positions, env.positions)
-    np.testing.assert_allclose(first_info["states"], second_info["states"])
 
-
-def test_rule_actions_and_dynamics_stay_finite() -> None:
+def test_reset_fixed_shapes_symmetry_and_finite_values() -> None:
     env = make_env()
-    observation, _ = env.reset(seed=2)
-    rule = RuleBasedOpponent()
-    initial_trail_points = len(env._trails[0][0])
-    for _ in range(5):
-        actions = np.stack([rule.act(env, 0), rule.act(env, 1)])
-        observation, rewards, terminated, truncated, info = env.step(actions)
-        assert np.isfinite(observation).all()
-        assert np.isfinite(rewards).all()
-        assert np.all(env.speeds[env.alive] >= env.config.speed_min)
-        assert np.all(env.speeds[env.alive] <= env.config.speed_max)
-        if terminated or truncated:
-            break
-    assert info["step"] > 0
-    assert len(env._trails[0][0]) >= initial_trail_points + env.physics_substeps
+    observations, info = env.reset(seed=17)
+    assert observations.shape == (2, 3, 40)
+    assert env.observation_space.shape == (2, 3, 40)
+    assert env.action_space.shape == (2, 3, 2)
+    assert info["global_state"].shape == (36,)
+    assert np.isfinite(observations).all()
+    assert np.isfinite(info["global_state"]).all()
+    assert np.max(np.abs(observations)) <= 1.0 + 1e-6
+    np.testing.assert_allclose(env.positions[0, :, 0], -env.positions[1, :, 0])
+    np.testing.assert_allclose(env.positions[0, :, 1], env.positions[1, :, 1])
+    np.testing.assert_allclose(env.speeds[0], env.speeds[1])
 
 
-def test_tail_lock_destroys_target_and_consumes_ammo() -> None:
-    env = make_env(agents_per_team=1, lock_seconds=0.8, decision_dt=0.4)
+def test_pair_geometry_tail_and_attack_conditions() -> None:
+    env = make_env()
     env.reset(seed=1)
-    env.positions[0, 0] = [0.0, 0.0]
-    env.positions[1, 0] = [500.0, 0.0]
-    env.headings[:, 0] = 0.0
-    env.speeds[:, 0] = env.config.speed_min
-    env._last_potential = np.array([env._potential(0), env._potential(1)])
+    put_pair(env, (0.0, 0.0), (500.0, 0.0), 0.0, 0.0)
+    distance, alpha, beta = env._compute_pair_geometry(0, 0, 1, 0)
+    assert distance == 500.0
+    assert abs(alpha) < 1e-9
+    assert abs(beta) < 1e-9
+    assert env._attack_valid(0, 0, 1, 0)
 
-    actions = np.zeros(env.action_space.shape, dtype=np.float32)
-    terminated = False
-    total_reward = 0.0
-    for _ in range(3):
-        _, reward, terminated, _, info = env.step(actions)
-        total_reward += float(reward[0, 0])
-        if terminated:
-            break
+    env.headings[1, 0] = math.pi
+    _, alpha, beta = env._compute_pair_geometry(0, 0, 1, 0)
+    assert abs(alpha) < 1e-9
+    assert math.isclose(abs(beta), math.pi)
+    assert not env._attack_valid(0, 0, 1, 0)
 
-    assert terminated
+    env.headings[1, 0] = 0.0
+    env.headings[0, 0] = math.radians(45.0)
+    assert not env._attack_valid(0, 0, 1, 0)
+
+    put_pair(env, (0.0, 0.0), (1201.0, 0.0), 0.0, 0.0)
+    assert not env._attack_valid(0, 0, 1, 0)
+
+
+def test_synchronous_mutual_kill() -> None:
+    env = make_env()
+    env.reset(seed=2)
+    env.alive[:] = False
+    env.alive[0, :2] = True
+    env.alive[1, :2] = True
+    env.positions[0, 0] = (0.0, 0.0)
+    env.positions[1, 0] = (500.0, 0.0)
+    env.headings[0, 0] = env.headings[1, 0] = 0.0
+    env.positions[1, 1] = (1000.0, 1000.0)
+    env.positions[0, 1] = (500.0, 1000.0)
+    env.headings[0, 1] = env.headings[1, 1] = math.pi
+    env.speeds.fill(150.0)
+    _, _, _, _, info = env.step(np.zeros((2, 3, 2), dtype=np.float32))
     assert not env.alive[1, 0]
-    assert env.ammo[0, 0] == env.config.ammunition - 1
-    assert info["winner"] == 0
-    assert info["kills"] == [1, 0]
-    assert info["first_kill_time"] is not None
-    assert total_reward > 0.0
+    assert not env.alive[0, 1]
+    assert info["combat_kills"] == [1, 1]
 
 
-def test_renderer_returns_rgb_frame() -> None:
+def test_multiple_attackers_count_one_target_once() -> None:
     env = make_env()
     env.reset(seed=3)
+    env.alive[:] = False
+    env.alive[0, :2] = True
+    env.alive[1, 0] = True
+    env.positions[0, 0] = (0.0, 0.0)
+    env.positions[0, 1] = (-100.0, 0.0)
+    env.positions[1, 0] = (500.0, 0.0)
+    env.headings.fill(0.0)
+    env.speeds.fill(150.0)
+    _, _, done, _, info = env.step(np.zeros((2, 3, 2), dtype=np.float32))
+    assert done
+    assert info["combat_kills"] == [1, 0]
+    assert info["episode_summary"]["red_combat_kill"] == 1
+
+
+def test_out_of_bounds_dies_immediately_and_cannot_attack() -> None:
+    env = make_env()
+    env.reset(seed=4)
+    env.positions[0, 0] = (4_900.0, 0.0)
+    env.headings[0, 0] = 0.0
+    env.speeds[0, 0] = 150.0
+    env.positions[1, 0] = (4_990.0, 0.0)
+    env.headings[1, 0] = math.pi
+    _, rewards, _, _, info = env.step(np.zeros((2, 3, 2), dtype=np.float32))
+    assert not env.alive[0, 0]
+    assert info["oob"][0] == 1
+    assert info["combat_kills"][0] == 0
+    assert info["event_reward"] <= -1.0
+    np.testing.assert_allclose(rewards[0], rewards[0, 0])
+
+
+def test_reward_components_and_terminal_timeout() -> None:
+    env = make_env(episode_steps=1)
+    env.reset(seed=5)
+    env.positions[0, :, 0] = -4_000.0
+    env.positions[1, :, 0] = 4_000.0
+    _, rewards, terminated, truncated, info = env.step(
+        np.zeros((2, 3, 2), dtype=np.float32)
+    )
+    assert terminated and not truncated
+    assert info["result"] == "draw"
+    assert info["terminal_reward"] == 0.0
+    assert math.isclose(
+        info["event_reward"] + info["terminal_reward"] + info["shaping_reward"],
+        info["total_reward"],
+        abs_tol=1e-7,
+    )
+    assert info["potential"] == 0.0
+    np.testing.assert_allclose(rewards[0], info["total_reward"])
+    np.testing.assert_allclose(rewards[1], -info["total_reward"])
+
+
+def test_dead_slots_and_renderer() -> None:
+    env = make_env()
+    env.reset(seed=6)
+    env.alive[0, 1] = False
+    observations = env._get_actor_obs()
+    state = env.global_state()
+    assert np.all(observations[0, 1] == 0.0)
+    assert np.all(state[6:12] == 0.0)
     frame = env.render()
     assert frame.shape == (320, 320, 3)
     assert frame.dtype == np.uint8
     assert frame.var() > 0
-
-
-def test_timeout_with_equal_survivors_is_draw() -> None:
-    env = make_env(agents_per_team=2, episode_seconds=1.0)
-    env.reset(seed=9)
-    env.positions[0] = [[0.0, 0.0], [100.0, 100.0]]
-    env.positions[1] = [[4000.0, 4000.0], [4200.0, 4200.0]]
-    env.ammo[0] = 0
-    env.ammo[1] = env.config.ammunition
-    actions = np.zeros(env.action_space.shape, dtype=np.float32)
-    _, _, terminated, truncated, info = env.step(actions)
-    assert not terminated
-    assert truncated
-    assert info["alive"] == [2, 2]
-    assert info["kills"] == [0, 0]
-    assert info["winner"] is None
