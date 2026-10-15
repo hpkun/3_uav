@@ -1,158 +1,170 @@
-# Fixed 5v5 Continuous 2D UAV Combat Baseline V2 环境规范
+# 文献约束下的二维连续5v5多无人机对抗基线 V2.1
 
-本环境是多篇二维多无人机对抗文献共同范式下构建的通用baseline，不是某一篇论文复现。采用用户本轮确定的参数与语义；不宣称每项参数都有某篇论文的唯一依据。固定5v5、二维定高，状态[x,y,v,heading]，红方vanilla continuous MAPPO，蓝方固定规则。没有导弹、弹药、概率命中、显式fire、6DOF、感知噪声、通信延迟、循环网络、attention、GNN、自博弈或课程学习。
+基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。本轮只改变collision、event reward与规则Blue及对应接口/统计；V2动力学、初始化、Radar、Weapon、Actor68D、Critic60D、Gaussian网络和PPO核心冻结。
 
-## 完整默认参数
+## 1. 文献原则与实现约定分工
 
-| 类别/配置项 | 值或定义 |
+本轮核对原文，使用下列来源，不把它们不一致的物理参数直接拼接：
+- [孙笠晋、李智：基于多智能体强化学习的无人机对抗技术研究](../基于多智能体强化学习的无人机对抗技术研究_孙笠晋%20(1).pdf)，PDF第4页/印刷页58，第2节和3.1节：二维、速度/航向、加速度与角速度动作、10000m地图。原文8v8、MADDPG，不宣称本项目复现其算法或积分顺序。
+- [邓岩：基于深度强化学习的无人机集群空战决策研究](C:/Users/HPK/Downloads/基于深度强化学习的无人机集群空战决策研究_邓岩.pdf)，PDF第30页/印刷页21，表3.1：探测3000m、攻击1000m。该文含弹药、探测角、概率等，本项目只沿用距离尺度，不引入其余机制。
+- [刘莹春：基于强化学习的无人机集群协同打击策略研究](C:/Users/HPK/Downloads/基于强化学习的无人机集群协同打击策略研究_刘莹春.pdf)，PDF第39–40页/印刷页28–29，3.3.1与式(3.11)：nearest-target、距离阈值触发escape/否则chase，collision作为惩罚事件；第38–40页支持攻击、边界与碰撞事件反馈。其原文为x/y加速度、不同空间尺度/概率攻击，不能拿来声称本项目转率/武器/奖励值完全来自原文。
+
+| Item | Literature-supported principle | V2.1 implementation | Literature parameter / implementation convention | Notes |
+|---|---|---|---|---|
+| 二维状态与连续动作 | 孙笠晋第2/3.1节，位置/速度/航向与加速度/角速度 | [x,y,v,h]，[a_norm,omega_norm] | 原则有文献支持，动作归一化/积分时序为约定 | action-immediate semi-implicit保留V2 |
+| 定高/固定5v5 | 二维集群仿真，刘莹春3.3.1为5v5 | 无z，双方各5架 | 场景约束与文献同类设置 | 不泛化NvN |
+| 地图 | 孙笠晋3.1为10000m×10000m | ±5000m方形 | 尺度有文献支持，坐标原点为约定 | 对称OOB死亡是本项目规则 |
+| 探测/攻击距离 | 邓岩表3.1 | 3000m / 1000m | literature parameter，来自距离尺度而非完整模型 | 不继承其导弹、命中概率或探测锥 |
+| Radar/共享 | 有限观测、队内信息共享的通用范式 | 确定性360°、任一友机发现即共享、无记忆 | implementation convention | 不将隐藏敌机传给Blue |
+| dt | 时间离散化 | 1s | implementation convention | 不宣称唯一论文值 |
+| 初速/速度范围 | 有界运动学 | U(95,105) / 50–150m/s | implementation convention | 初速每机独立 |
+| 加速度/转率 | 连续受限控制 | ±10m/s² / ±10°/s | implementation convention | 不是瞬时反向 |
+| 出生与heading | 独立随机初始化 | 红x[-3800,-3200]，蓝[3200,3800]，y[-3000,3000]、同队间隔500，航向±5° | implementation convention | 无镜像五航线 |
+| 68D / 60D编码 | 局部Actor/全局Critic | 固定ID slots、三角编码、valid、alive | implementation convention | 不用nearest-K |
+| 武器角度 | 距离与攻击/目标几何判定 | ATA±30°、aspect±45° | 冻结的implementation convention | 尤其45° target aspect不是上述文献直接参数 |
+| 碰撞 | 刘莹春式(3.11)以空间接近触发惩罚 | 50m swept检测、每步每机去重、不致死 | 原则有依据；50m与swept是implementation convention | 原文阈值/尺度/惩罚不照搬 |
+| Blue追逃 | 刘莹春3.3.1最近敌机、近则escape/否则chase | 每步最近detected、无target memory | 原则有依据；continuous heading适配为约定 | 无assignment/tail/patrol/避碰 |
+| 逃逸阈值 | 原文给出切换规则，未公开具体阈值 | null运行时取attack_range=1000m | implementation convention，不是literature parameter | 为不引入额外尺度统一为attack_range |
+| Blue边界返回 | 本轮明确指定的简化反向航向规则 | 当前heading名义预测下一步越界时，朝h+pi转向 | continuous finite-turn implementation adaptation | 不声称原文证明有限转率下必不出界；无margin |
+| Reward | 击毁/损失/碰撞/边界/结果的事件反馈原则 | +10/-10/-5/-20/±20，shared-team sum | 数值和shared-team reward adaptation为implementation convention | 不照搬原文步进惩罚或概率反馈 |
+
+阈值说明：论文只给出了“距离低于阈值执行逃逸，否则追击”的规则，没有公开该阈值具体数值。本项目为了不引入额外尺度，将blue_escape_distance统一为已有attack_range。这是implementation convention，不是literature parameter。为边界明确，代码使用d≤threshold为escape、d>threshold为chase；等号归属也是约定。
+
+## 2. 最终完整配置
+
+| 配置项 | 默认值 |
 |---|---|
 | N_AGENTS / OBS_DIM / STATE_DIM / ACTION_DIM | 5 / 68 / 60 / 2 |
-| map_size / bounds | 10000 m / x,y∈[-5000,5000] m |
-| dt / episode_steps | 1 s / 300 |
-| speed_min / speed_max | 50 / 150 m/s |
-| initial_speed_min / max | 95 / 105 m/s，独立均匀采样 |
-| max_acceleration / max_turn_rate_degrees | 10 m/s² / 10°/s |
-| spawn_x_min / max | 3200 / 3800 m，红取负、蓝取正 |
-| spawn_y_min / max / min_spawn_y_separation | -3000 / 3000 / 500 m |
-| heading_jitter_degrees | 每架独立±5°，红围绕0、蓝围绕π |
-| radar_range | 3000 m，含边界 |
-| attack_range / attack_ata_degrees / attack_aspect_degrees | 1000 m / 30° / 45°，含边界，角为半角 |
-| collision_distance | 50 m，含边界，swept collision |
-| blue_boundary_margin | 1000 m |
-| blue_collision_avoidance_distance | 300 m，严格小于且closing |
-| blue_assignment_interval | 5 steps |
-| blue_tail_distance / blue_far_distance / blue_speed_advantage | 700 m / 2000 m / 10 m/s |
-| weapon_kill_reward / weapon_loss_penalty | 5 / 5 |
-| oob_penalty / collision_penalty / terminal_reward | 5 / 5 / 20 |
-| shaping_scale / shaping_gamma | 0.5 / 0.99 |
-| potential_distance_weight / ata_weight / aspect_weight | 0.25 / 0.375 / 0.375 |
-| Actor / Critic | 68–128–128–2 / 60–128–128–1，MLP Tanh隐藏层 |
-| log_std初始化 / clamp | 两维状态无关可训练参数 -0.5 / [-5,1] |
-| actor_learning_rate / critic_learning_rate | 0.0003 / 0.0003 |
-| gamma / gae_lambda | 0.99 / 0.95 |
-| clip_ratio / value_clip | 0.2 / 0.2 |
-| entropy_coefficient / value_coefficient / max_grad_norm | 0.01 / 0.5 / 0.5 |
-| update_epochs / minibatch_size | 10 / 512 |
-| seed / blue_strategy | 7 / 2 |
-| total_env_steps / parallel_envs / rollout_length | 2000000 / 16 / 128 |
+| map_size / dt / episode_steps | 10000m / 1s / 300 |
+| speed_min / speed_max | 50 / 150m/s |
+| initial_speed_min / max | 95 / 105m/s |
+| max_acceleration / max_turn_rate_degrees | 10m/s² / 10°/s |
+| spawn_x_min / max | 3200 / 3800m，红取负蓝取正 |
+| spawn_y_min / max / min_spawn_y_separation | -3000 / 3000 / 500m |
+| heading_jitter_degrees | 5°，红围绕0、蓝围绕pi |
+| radar_range / attack_range | 3000 / 1000m |
+| attack_ata_degrees / attack_aspect_degrees | 30° / 45°，半角，inclusive |
+| collision_distance | 50m，inclusive |
+| blue_escape_distance | null → 运行时attack_range；允许显式数值 |
+| weapon_kill_reward / weapon_loss_penalty | 10 / 10 |
+| collision_penalty / oob_penalty / terminal_reward | 5 / 20 / 20 |
+| hidden_size / Actor / Critic | 128 / 68-128-128-2 / 60-128-128-1 |
+| log_std init / clamp | -.5 / [-5,1] |
+| actor_learning_rate / critic_learning_rate | 3e-4 / 3e-4 |
+| gamma / gae_lambda | .99 / .95 |
+| clip_ratio / value_clip | .2 / .2 |
+| entropy_coefficient / value_coefficient | .01 / .5 |
+| max_grad_norm / update_epochs / minibatch_size | .5 / 10 / 512 |
+| seed / parallel_envs / rollout_length | 7 / 16 / 128 |
+| total_env_steps / device | 2000000 / cuda |
 | log_interval_steps / checkpoint_interval_steps | 20000 / 100000 |
 | evaluation_interval_steps / evaluation_episodes | 100000 / 100 |
-| output_dir / device | runs/v2_5v5_seed7 / cuda |
-| render width / height / margin | 800 / 800 / 45 px |
+| output_dir | runs/v2_1_5v5_seed7 |
+| render width / height / margin | 800 / 800 / 45 |
 | show_trails / trail_length / icon_source | true / 80 / 对抗环境图.png |
 
-权威可执行参数为configs/base.yaml，dataclass与配置默认值经测试核对。smoke覆盖网络宽64、PPO epoch2/batch32、2进程、64步rollout、1280总步、CPU等短测试设置，不改变物理/reward。smoke日志间隔256，checkpoint/eval间隔640，每次内置评估4回合。
+configs/base.yaml为正式配置。smoke保持既有轻量设置：seed11、隐藏64、epoch2、batch32、1280步、2进程、rollout64、log256、checkpoint/eval640、内置eval4、CPU；未为V2.1调整PPO。正式网络/PPO与V2逐项相同，models.py和mappo.py未修改。
 
-## Reset与连续动力学
-
-红蓝x、各队y、每架速度与heading扰动独立由环境RNG采样。每队最多1000次rejection sampling选5个y，任意两架同队y间距≥500。fallback在区间内均匀布点，加入独立小jitter（最多100m且受间距余量限制）并随机置换ID；红蓝独立生成。不沿用镜像五航线。
-
-单机动作[a_norm,omega_norm]∈[-1,1]²，同时控制加减速和转向：
+## 3. 冻结的运动学与初始化
 
 ```text
-a = 10*a_norm
-omega = radians(10)*omega_norm
+a = a_norm * 10
+omega = omega_norm * radians(10)
 v_next = clip(v + a*dt, 50, 150)
-heading_next = wrap(heading + omega*dt)      # [-pi,pi)
-p_next = p + dt*v_next*[cos(heading_next), sin(heading_next)]
+h_next = wrap(h + omega*dt)            # [-pi,pi)
+p_next = p + dt*v_next*[cos(h_next),sin(h_next)]
 ```
 
-全环境动作(2,5,2) float32。非法shape、非有限或越界动作拒绝，仅容许1e-6浮点误差后clip。死亡飞机冻结。不存在离散动作、action mask或环境替红方避碰。
+动作当前步即影响位移，死亡机冻结；全环境动作(2,5,2) float32，单机范围[-1,1]²，非法shape/非有限/越界拒绝（仅1e-6浮点容差）。速度、heading扰动每机独立，红蓝坐标分别采样。每队最多1000次rejection保证y间隔≥500，fallback均匀点+独立小jitter并置换ID，红蓝独立。不恢复镜像五航线。
 
-## 感知、68D Actor与60D Critic
+## 4. 冻结的Radar、Actor、Critic和Weapon
 
-team T的敌机j可见，当且仅当至少一个存活友机与其距离≤3000m。队内即时共享、无损无延迟、无记忆；离开全队覆盖即隐藏。存活友机始终已知。蓝方也只读取这个detected集合。
+team_detected_enemy_mask(team)：存在任一存活友机距敌机≤3000m即detected，360°range-only、即时理想共享、无contact memory；离开全队覆盖立即隐藏。Blue不能读隐藏敌机。
 
-对观察者i和实体j：LOS=atan2(yj-yi,xj-xi)，alpha=wrap(LOS-heading_i)，beta=wrap(LOS-heading_j)。以下索引0-based：
+alpha=wrap(LOS-own_heading)，beta=wrap(LOS-other_heading)。Actor固定68D，0-based：
 
-| Actor索引 | 内容 |
+| 索引 | 内容 |
 |---|---|
-| 0,1 | own x/5000, y/5000 |
-| 2 | own v_norm=2*(v-50)/100-1 |
-| 3,4 | sin(own heading), cos(own heading) |
-| 5–32 | 其余4友机按固定ID升序（跳过自身），每架7D |
-| 33–67 | 5敌机固定ID0–4，每架7D |
+| 0–4 | x/5000,y/5000,2*(v-50)/100-1,sin(h),cos(h) |
+| 5–32 | 其余4友机，按ID升序跳过自身，各7D |
+| 33–67 | 5敌机固定ID，各7D |
 
-每个7D slot逐维：[d/(sqrt(2)*10000), sin(alpha), cos(alpha), sin(beta), cos(beta), clip((v_j-v_i)/100,-1,1), valid]。死亡友机、未探测/死亡敌机全slot为0；自身死亡整个68D为0。valid代表当前有效可观测实体，不是永久存活记忆。
+7D=[d/(sqrt(2)*10000),sin(alpha),cos(alpha),sin(beta),cos(beta),clip(delta_v/100,-1,1),valid]。存活友机始终已知，敌机只填detected活机。死亡/隐藏slot零；死亡Actor整个68D零。
 
-Critic依次R0–R4、B0–B4，每架[x/5000,y/5000,v_norm,sin(heading),cos(heading),alive]六维，共60D；死亡slot全0。Critic看真实全局，不受雷达限制，不将隐藏信息传入Actor或规则策略。
+Critic60D按R0–R4/B0–B4排列，各[x/5000,y/5000,v_norm,sin(h),cos(h),alive]。死亡slot零，全局状态不受Radar限制。
 
-## 自动武器、碰撞、出界与终局
+Weapon：d≤1000 AND |alpha|≤30° AND |beta|≤45°，无fire动作，直接击毁；尾追有效、迎头无效。每攻击者选最近合法目标，等距小ID；同一pre-weapon alive快照收集后同步结算，支持mutual kill，多攻击者同victim只计一次weapon kill。collision不再排除任何活机；OOB机依旧排除。
 
-合法几何：d≤1000 AND |alpha|≤30° AND |beta|≤45°。beta约0是同向尾追，约180°是迎头，迎头不可开火。无需独立fire动作，满足几何即击毁。
+## 5. Collision/OOB/terminal顺序
 
-每个攻击者从本步合法敌机中选最近者，等距按ID；双方均基于同一pre-weapon alive快照收集victims，再同时置dead。支持相互击毁；多人打同一目标只算一次死亡和kill。
+validate → old positions → continuous movement → OOB → collision event detection → weapon collection → synchronous weapon → step+1 → terminal/winner → event reward → next obs/state/info。
 
-碰撞覆盖任意友敌pair：计算两机本步线性运动段上同步时刻最小距离，≤50m则双方损毁。不是任意两条轨迹相交就碰撞，必须时间同步。每架每步多pair去重。
+OOB：移动后任一|coordinate|>5000则死亡，恰等于边界不死；不能参加本步collision/weapon，无clamp/reflect/teleport。
 
-固定step顺序：动作校验 → 保存old positions/Phi → 更新v/heading并移动 → OOB → swept collision → pre-weapon快照/窗口与contact计数 → 同步weapon → step+1 → terminal/winner → event/terminal reward → potential shaping → obs/state/active/info。
+Collision：沿本步同步线性运动段求最小中心距离，≤50m触发。友友、敌敌、敌我均检测；本步与任意其它活机发生碰撞的每架UAV计一次event，多pair不重复。本步计过后下一步再次接近仍可再计，因此累计events可超过5。collision不修改alive、不冻结运动、不直接终止回合，仍允许本步开火；若之后被weapon击毁，真正死亡原因仍是weapon。
 
-移动后任一坐标绝对值>5000即OOB；恰在边界未OOB。无反射、teleport或物理clamp。OOB机不参与本步碰撞/攻击；碰撞机不参与本步攻击。因此同一架一局仅一种死亡原因。渲染可裁剪画面残骸坐标，不修改物理状态。
+只有weapon和OOB造成死亡：alive+weapon_losses+oob_losses=5（每队）。collision_events不加入死亡数或death share。后续策略动作可能受碰撞惩罚训练影响，但胜负函数不直接读取collision计数。
 
-任一方全灭或到300步终止；仅蓝全灭红胜、仅红全灭蓝胜、同时全灭平局；timeout比较存活数，多者胜，相同平局。300步是真正terminal，不做外部截断bootstrap。
+任一方全灭或300步终止；仅一方全灭另一方胜，同步全灭平；timeout比alive数，相等平。300步是真terminal，GAE不改。
 
-## Reward与Phi
-
-本队各agent共享team reward；Actor loss只计存活agent。
+## 6. 纯event-based共享奖励
 
 ```text
-R_T = R_weapon + R_oob + R_collision + R_terminal + R_shape
-R_weapon = +5*本步weapon kills -5*本步weapon deaths
-R_oob = -5*本步本队OOB deaths
-R_collision = -5*本步本队collision deaths
-R_terminal = 胜:+20 / 负:-20 / 平或非终局:0
+kill_reward[T] = +10 * 本队本步真实weapon kills
+weapon_loss_reward[T] = -10 * 本队本步weapon deaths
+collision_reward[T] = -5 * 本队本步参与collision的独立UAV数
+oob_reward[T] = -20 * 本队本步OOB deaths
+terminal_reward[T] = win:+20 / loss:-20 / draw或未终局:0
+R_team = 五项之和
 ```
 
-敌方OOB/collision无己方即时kill奖励，但可能影响最终胜负。最后weapon kill与terminal可叠加。Red-Blue撞击双方各-5，没有kill reward。
+同team活Actor共享同一transition reward，team GAE保持原样。敌方OOB/碰撞不产生本方kill reward。collision与weapon可同step叠加；最后一次weapon kill和terminal可叠加。每回合return为Red团队总reward累计，不乘5，严格等于五项累计和。
+
+RewardConfig仅上述五个权重，REWARD_COMPONENTS仅kill_reward、weapon_loss_reward、collision_reward、oob_reward、terminal_reward。没有potential、distance/angle/speed shaping，也无固定步进惩罚。
+
+## 7. 唯一Blue规则完整伪代码
+
+RuleBasedOpponent()无参数、无持久target数组、无controller state；act(env,team=1)返回(5,2) float32。规则双方使用两个独立对象。
 
 ```text
-q_d = clip((3000-d)/(3000-1000),0,1)
-q_alpha = (1+cos(alpha))/2
-q_beta = (1+cos(beta))/2
-q_ij = .25*q_d + .375*q_alpha + .375*q_beta
-Q_T = mean_{team-detected alive enemy j}(max_{alive friend i}(q_ij))
-无detected enemy则Q_T=0
-Phi = Q_red-Q_blue
-R_shape_red = .5*(.99*Phi_next-Phi_current)
-R_shape_blue = -R_shape_red
+actions = zeros(5,2)
+detected = team_detected_enemy_mask(team)
+escape_distance = attack_range if blue_escape_distance is null else blue_escape_distance
+for each alive UAV i:
+    predicted = p_i + v_i*[cos(h_i),sin(h_i)]*dt
+    if any(abs(predicted)>map_size/2):
+        desired = wrap(h_i+pi)
+    else:
+        j = nearest currently detected enemy (distance, enemy_id tie-break)
+        if no j:
+            continue                        # [0,0] straight
+        delta = p_j-p_i
+        if distance(i,j)<=escape_distance:
+            delta = -delta                  # escape
+        desired = atan2(delta.y,delta.x)     # otherwise chase
+    error = wrap(desired-h_i)
+    actions[i] = [0, clip(error/(radians(10)*dt),-1,1)]
+return actions
 ```
 
-终局强制Phi_next=0。质量仅针对team-detected敌机，攻击者为全部存活友机，允许队友共享contact。shaping零和，自身OOB/collision惩罚不要求零和。episode return累计Red团队reward，不乘5，等于五分量累计和。
+优先级仅Boundary > Chase/Escape > Straight。Blue不加减速，保持各自95–105m/s初速，无target记忆、assignment、tail/offset/预测点、patrol、collision avoidance、threat break、hysteresis或FSM。
 
-## 三种连续蓝方
+边界返回是在连续控制约束下采用朝反向航向转向的实现适配，不是瞬时物理反转。每步重新名义预测，未增加margin；最大转率限制下仍可能OOB，必须如实计数，不隐式保护Blue。精确pi的wrap落在-pi，是通用角度表示的数值归属，不另加固定左右让行规则。
 
-优先级：boundary safety > collision avoidance > combat > patrol。仅选择动作，不改env物理状态。
+## 8. 未改变的连续MAPPO与采样
 
-控制器：a_norm=clip((desired_v-v)/(10*dt),-1,1)；omega_norm=clip(wrap(desired_heading-heading)/(radians(10)*dt),-1,1)。
+Gaussian mean MLP、状态无关log_std、tanh采样及Jacobian logprob correction、atanh重算、pre-squash Normal entropy近似、dead active mask、float32 (T,E,5,2) buffer、team GAE、所有PPO核心参数保留。无action masks。父进程批量推理、先向全部worker发送后收集，每个worker独立env与Blue，默认16个真正子进程和CUDA learner。
 
-boundary：距任意边界≤1000且朝其外侧，朝clip(current_xy,-3500,3500)安全点转向，若重合则朝中心，目标速度100。
+普通resume恢复optimizer/计数，init-checkpoint只载兼容权重，不构成课程。旧V2 continuous权重形状相容但奖励/对手任务已变化，不能用旧实验宣称V2.1效果；本轮验证全部从零训练，不迁移旧Categorical权重。总steps按全部环境合计，最后horizon缩短、不向上取整。
 
-avoidance：最近其它已知活机（友机及detected敌机），距离<300且dot(p_other-p_own,v_other-v_own)<0时，朝远离方向转向，目标速度max(50,current_v-20)。无mask/shield。300m内敌机自然在雷达覆盖内。
+## 9. 统计定义
 
-Strategy1 Direct Pursuit：每架每步追最近detected敌机当前位置，等距按ID；目标速度120（未唯一规定部分的实现选择），无目标则patrol。
+统一字段red_collision_events/blue_collision_events，env累计collision_events；不保留错误语义的collision_losses或red_collision兼容key。其余包括双方alive、combat_kill、weapon_loss、oob、attack_window、radar_contact_steps、length、return/result与五reward分量。
 
-Strategy2 Assigned Tail Pursuit（默认）：全部存活友机与detected敌机pair按(distance,friend_id,enemy_id)升序greedy一对一匹配；目标数少时剩余友机追最近敌机。每5步、target死亡/失联，或无target时出现contact，重分配。目标点p_target-700*[cos(h_target),sin(h_target)]。距离>2000速度150，否则clip(v_target+10,50,150)。
+attack window为pre-weapon全部合法pair数，包含碰撞事件参与者；contact steps每step同team至少一个contact加1（OOB后/weapon前）。相同range与共享使双方contact steps对称。
 
-Strategy3 Threat-aware Tail Pursuit：无威胁时与S2一致；选择最近detected威胁，要求敌→己距离≤1500、敌ATA≤45°、己作为目标aspect≤70°。比较己±10°/s的一步候选，选使敌→己aspect绝对值更大的方向，速度目标150。预测使用本次加速后己速度和敌机恒速度/航向一步外推，等分固定右转（实现选择）。无额外FSM，仍受boundary/avoidance优先级覆盖。
+death_total仅weapon_loss+oob，weapon_death_share分母0时为0。碰撞另报每局events与collision episode rate（该回合至少一事件的比例），不计算collision death share。sanity额外报告weapon_combat_episode_rate。
 
-patrol：各机首次act保存自己的initial_y；在x=-1000、+1000且同一initial_y的两个waypoint往返，首次选较近者，距点<300时切换；目标速度100。红蓝rule-vs-rule的controller state彼此独立，每回合reset。
+episodes.csv逐回合；updates.csv每更新记录最近100回合均值/WDL与八PPO指标；TensorBoard/console同步。sanity四模式各100局：rule双方独立规则对象，random红U(-1,1)²，passive红[0,0]，pursuit红最近detected直接追击、a=0、无escape，边界仅同一nominal reversal。
 
-## 连续MAPPO与真正并行采样
-
-Actor输出两维mean，状态无关可训练log_std初始化-0.5并clamp[-5,1]。u~Normal(mean,exp(log_std))、a=tanh(u)；deterministic为tanh(mean)。
-
-```text
-log pi(a|s) = sum_k [Normal.log_prob(u_k)-log(1-a_k²+1e-6)]
-```
-
-PPO重算将action clamp至[-1+1e-6,1-1e-6]再atanh，使用同样Jacobian修正。entropy为pre-squash Normal entropy近似，不宣称tanh后精确entropy。死亡action/logprob设0，active mask排除actor loss/entropy/KL等统计。Buffer actions为float32 (T,E,5,2)，无categorical action mask。保留GAE、PPO clipping/value clipping/gradient clipping等核心设置；不提供旧离散checkpoint迁移。
-
-每个环境独立持久子进程，拥有独立env及blue controller；父进程批量推理，先向全部worker发动作，再收集。worker能并行执行，接收循环不等于串行环境。默认16workers、CUDA learner，NumPy环境在CPU。总步数为全部环境合计，最后horizon按剩余步缩短，不向上取整。
-
-## 统计与验收
-
-combat_kills/weapon_losses仅weapon；OOB/collision去重。attack_window_count为post-OOB/collision、pre-weapon快照中所有合法attacker-target pair累计，不是kill数；radar_contact_steps为该时点team存在contact则+1。对称圆形range使双方contact步相同，这是几何对称性。
-
-episode summary包含双方alive、kill/loss、OOB、collision、window、contact，length、return、result及五reward分量。episodes.csv存逐回合；updates.csv每次更新存最近100回合均值/WDL及八PPO指标，TensorBoard和控制台同步。断点续训保留optimizer与计数；仅权重初始化重置二者，不自动形成课程。
-
-实际测试、四组各100回合sanity、death share和行为问题见validation_v2_5v5.md。旧Xu与旧continuous文档/数据仅供历史参考，不是V2证据。
+实际结果见[validation_v2_1_5v5.md](validation_v2_1_5v5.md)。旧validation_v2_5v5.md仅历史，不改其原始行为数据。

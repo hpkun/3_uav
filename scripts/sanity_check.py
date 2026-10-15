@@ -14,18 +14,18 @@ MODES = ("rule-vs-rule", "random-vs-rule", "passive-vs-rule", "pursuit-vs-rule")
 
 
 def pursuit_red_actions(env):
-    """Nearest detected direct pursuit at 120m/s; boundary recovery only."""
+    """Nearest detected direct pursuit, no escape or acceleration; nominal boundary return."""
     actions = np.zeros((env.N_AGENTS, env.ACTION_DIM), dtype=np.float32)
-    enemies = np.flatnonzero(env.team_detected_enemy_mask(0))
+    detected = env.team_detected_enemy_mask(0)
     for agent in np.flatnonzero(env.alive[0]):
-        point = RuleBasedOpponent.boundary_point(env, 0, agent)
-        speed = 100. if point is not None else 120.
-        if point is None and len(enemies):
-            target = min(enemies, key=lambda j: (float(np.linalg.norm(env.positions[1,j] - env.positions[0,agent])), j))
-            point = env.positions[1,target]
-        heading = (env.headings[0,agent] if point is None
-                   else RuleBasedOpponent._heading_to(env, 0, agent, point))
-        actions[agent] = RuleBasedOpponent.control(env, 0, agent, heading, speed)
+        heading = RuleBasedOpponent.boundary_heading(env, 0, agent)
+        if heading is None:
+            target = RuleBasedOpponent.nearest_target(env, 0, agent, detected)
+            if target is None:
+                continue
+            delta = env.positions[1, target] - env.positions[0, agent]
+            heading = np.arctan2(delta[1], delta[0])
+        actions[agent] = RuleBasedOpponent.control(env, 0, agent, heading)
     return actions
 
 
@@ -43,27 +43,30 @@ def summarize(rows):
     audit = {}
     for label, teams in [('red', ['red']), ('blue', ['blue']), ('combined', ['red', 'blue'])]:
         weapon = sum(sum(int(row[f'{t}_weapon_loss']) for t in teams) for row in rows)
-        collision = sum(sum(int(row[f'{t}_collision']) for t in teams) for row in rows)
         oob = sum(sum(int(row[f'{t}_oob']) for t in teams) for row in rows)
-        total = weapon + collision + oob
-        audit[label] = {'death_total': total, 'weapon_losses': weapon, 'collision': collision, 'oob': oob,
+        total = weapon + oob
+        audit[label] = {'death_total': total, 'weapon_losses': weapon, 'oob': oob,
                         'weapon_death_share': weapon / total if total else 0.,
-                        'collision_share': collision / total if total else 0.,
                         'oob_share': oob / total if total else 0.}
     result['death_audit'] = audit
+    result['collision_episode_rate'] = {
+        label: sum(any(row[f'{team}_collision_events'] > 0 for team in teams) for row in rows) / episodes
+        for label, teams in [('red', ['red']), ('blue', ['blue']), ('combined', ['red', 'blue'])]
+    }
+    result['weapon_combat_episode_rate'] = sum(
+        row['red_combat_kill'] + row['blue_combat_kill'] > 0 for row in rows
+    ) / episodes
     return result
 
 
 def run_scenario(config_path, mode, episodes, seed_start):
     cfg = load_config(config_path)
     env = UAVCombatEnv(cfg.environment, cfg.reward, cfg.render)
-    red_rule, blue_rule = RuleBasedOpponent(2), RuleBasedOpponent(2)
+    red_rule, blue_rule = RuleBasedOpponent(), RuleBasedOpponent()
     rng = np.random.default_rng(seed_start + 9999991)
     rows = []
     for episode in range(episodes):
         env.reset(seed=seed_start + episode)
-        red_rule.reset()
-        blue_rule.reset()
         done = False
         while not done:
             if mode == 'rule-vs-rule':
@@ -83,7 +86,7 @@ def run_scenario(config_path, mode, episodes, seed_start):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Continuous 5v5 V2 behavioral sanity checks')
+    parser = argparse.ArgumentParser(description='Continuous 5v5 V2.1 behavioral sanity checks')
     parser.add_argument('--config', default='configs/base.yaml')
     parser.add_argument('--mode', choices=('all', *MODES), default='all')
     parser.add_argument('--episodes', type=int, default=100)

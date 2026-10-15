@@ -1,63 +1,68 @@
-# 通用二维连续 5v5 多无人机对抗基线 V2
+# 文献约束下的二维连续5v5多无人机对抗基线 V2.1
 
-Fixed 5v5 Continuous 2D UAV Combat Baseline V2。固定红蓝各5架、二维定高，红方共享策略continuous MAPPO，蓝方简单固定规则。这是多篇二维多无人机对抗文献共同范式下构建的通用baseline，不是某一篇论文复现。
+基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不完全复现任何单篇论文。红方vanilla continuous MAPPO；蓝方唯一、无状态的最近detected目标chase/escape规则。
 
-当前接口：68D局部Actor、60D全局Critic、单机连续动作[a_norm, omega_norm]∈[-1,1]²。10 km地图、1 s步长、最多300步；3 km雷达及即时队内共享；1 km自动武器、ATA半角30°、target aspect半角45°；50 m swept collision；真实出界损毁。先更新速度/航向，再移动。
+V2.1冻结V2动力学/初始化/Radar/Weapon/68D Actor/60D Critic/Gaussian网络和PPO。核心变化：collision为非致死安全事件；纯五分量event reward；删除三种Blue、assignment、tail point、patrol、避碰控制和potential shaping。
 
-完整定义见[环境规范](docs/environment_spec.md)，实际行为数据和已知问题见[V2验收报告](docs/validation_v2_5v5.md)。本轮规则对抗仍由碰撞主导，不推荐直接进入正式长训。旧Xu和旧continuous数据不作为V2证据。
+完整参数、文献来源与implementation convention见[环境规范](docs/environment_spec.md)；75项测试、1280步smoke、4×100 sanity和50k学习性验证见[V2.1验收报告](docs/validation_v2_1_5v5.md)。50k仅初步学习性证据，不能据此评价最终算法性能；2M未运行。
 
-## 运行
+## 定义速览
 
-在Windows终端执行：
+10km方形地图、dt1s、最多300步；速度50–150m/s、初速95–105m/s；动作[a_norm,omega_norm]同时控制±10m/s²和±10°/s，先更新速度/航向再移动。3km确定性Radar，任一活友机发现即即时共享、无记忆。1km自动武器，ATA半角30°、target aspect半角45°，满足才击毁。
+
+50m swept collision只计每步参与的独立UAV事件，不修改alive，也不阻止当步weapon。仅weapon与OOB导致死亡。Reward为+10 kill、-10 weapon loss、-5每机collision event、-20 OOB、terminal±20/0；没有shaping。
+
+Blue仅Boundary > Chase/Escape > Straight，a_norm恒0。blue_escape_distance:null在运行时取attack_range=1000m，属于implementation convention而不是论文公布的阈值。边界仅预测当前速度/航向下一步会越界时朝反向航向转，受有限转率限制仍可能OOB；不加margin或shield。
+
+## 运行（WSL + conda uav）
+
+Windows终端：
 
 ```powershell
 wsl -d Ubuntu
 ```
 
-进入WSL后：
+WSL：
 
 ```bash
 source /home/hpk/anaconda3/etc/profile.d/conda.sh
 conda activate uav
 cd /mnt/c/Users/HPK/Desktop/3_uav
-# 仅首次尚未安装本项目时需要：
+# 仅尚未安装本项目时需要
 pip install -e '.[dev]'
 pytest -q
 uav2d-train --config configs/smoke.yaml
 uav2d-evaluate --config configs/smoke.yaml \
-  --checkpoint runs/smoke_v2_5v5/checkpoints/final.pt \
-  --episodes 20 --seed-start 300000 \
-  --output runs/v2_validation/smoke_evaluation.json
+  --checkpoint runs/smoke_v2_1_5v5/checkpoints/final.pt \
+  --episodes 20 --seed-start 300000
 python scripts/sanity_check.py --mode all --episodes 100 \
-  --seed-start 200000 --output runs/v2_validation/sanity.json
+  --seed-start 200000 --output runs/v2_1_validation/sanity.json
 python scripts/behavioral_audit.py --episodes 20
 ```
 
-正式配置默认CUDA learner、16个独立持久子进程环境、每环境128步rollout、总计2M环境步。父进程批量推理，向全部worker发送后再收集；各worker独立推进env与蓝方策略，是真正多进程，不是顺序调用16个env。环境NumPy计算在CPU，learner在CUDA；CUDA不可用会告警回退CPU，启动行显示实际device和worker PID。
-
-以下只提供正式命令，本轮未执行；须先解决验收报告中的行为问题：
+默认正式配置仍为CUDA、16个独立持久环境进程、rollout128。环境在CPU各worker执行，learner批量推理/更新在CUDA。动作先发全部worker再收集，不是假并行。device=cuda要求可用CUDA；只有显式--device auto才自动选择CUDA/CPU，启动行显示实际device/PID。
 
 ```bash
+# sanity满足武器交战且OOB不明显主导时，才运行50k学习性验证
+uav2d-train --config configs/base.yaml --steps 50000 --output runs/v2_1_learnability_seed7
+# 下列是未来正式命令，本轮未运行，不代表已批准长训
 uav2d-train --config configs/base.yaml
 ```
 
-2M是所有环境合计2,000,000步，不是每环境2M，也不是2M回合。最后一轮缩短horizon，步数不向上取整；请求步数必须能被parallel_envs整除。可用--steps、--output、--device、--seed、--blue-strategy覆盖配置，默认蓝方Strategy2。
+2M为全部环境合计2,000,000步，不是每环境2M或2M回合；最后horizon缩短，steps须能被parallel_envs整除。支持--steps/--output/--device/--seed，已删除--blue-strategy。
 
 ```bash
-# 同一V2结构断点续训，保留optimizer/计数/best评估
-uav2d-train --config configs/base.yaml --resume runs/v2_5v5_seed7/checkpoints/final.pt
-# 仅兼容V2权重初始化，重置optimizer和计数，不自动构成课程
-uav2d-train --config configs/base.yaml --init-checkpoint PATH_TO_V2_CHECKPOINT
 uav2d-evaluate --config configs/base.yaml \
-  --checkpoint runs/v2_5v5_seed7/checkpoints/best.pt \
-  --episodes 500 --output runs/v2_5v5_seed7/evaluation.json
-tensorboard --logdir runs/v2_5v5_seed7/tensorboard
+  --checkpoint runs/v2_1_5v5_seed7/checkpoints/final.pt \
+  --episodes 500 --output runs/v2_1_5v5_seed7/evaluation.json
+uav2d-train --config configs/base.yaml --resume PATH_TO_V2_1_CHECKPOINT
+# 仅权重初始化，重置optimizer/计数
+uav2d-train --config configs/base.yaml --init-checkpoint PATH_TO_COMPATIBLE_CHECKPOINT
+tensorboard --logdir runs/v2_1_5v5_seed7/tensorboard
 ```
 
-resume与init-checkpoint互斥。旧Categorical checkpoint不兼容，不提供迁移。smoke网络宽64，仅适配自身配置；正式网络宽128，不能直接使用smoke权重初始化。
+resume与init-checkpoint互斥，不自动添加课程。smoke网络64宽，正式128宽，不能混载。旧Categorical checkpoint不迁移。旧V2 continuous形状相容但任务已改变，不将旧训练数据当V2.1证据；本轮从零训练。
 
-## 日志与范围
+输出：episodes.csv逐回合、updates.csv每次更新最近100回合均值及八PPO指标、tensorboard/、checkpoints/。日志明确使用collision_events，不是collision loss；五reward可直接核账return。评估默认确定性tanh(mean)，--gif可保存首局动画，原图标/轨迹保持。
 
-输出目录包含episodes.csv（逐回合）、updates.csv（每次PPO更新，最近100回合汇总及八项PPO指标）、tensorboard/、checkpoints/。控制台显示step、完成回合数、滑动平均return/WDL、双方alive/weapon kill与loss/OOB/collision/window/contact、长度、五reward及八PPO指标。评估使用确定性tanh(mean)，支持--gif保存首回合动画，沿用原无人机图标和轨迹渲染。
-
-不包含导弹、弹药、概率命中、fire action、GRU/attention/GNN、自博弈、复杂战术FSM或课程学习。三份旧Xu课程配置已删除，历史文档顶部明确标为HISTORICAL / DEPRECATED，实验数据保留。
+无导弹、弹药、概率命中、fire action、attention/GRU/GNN、自博弈、复杂战术或课程。旧验证文档和实验数据保留并标记历史。

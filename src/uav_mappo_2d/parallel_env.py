@@ -31,7 +31,6 @@ def _worker(
     reward_config: RewardConfig,
     render_config: RenderConfig,
     project_root: str,
-    blue_strategy: int,
 ) -> None:
     env = UAVCombatEnv(
         environment_config,
@@ -39,7 +38,7 @@ def _worker(
         render_config,
         project_root=project_root,
     )
-    opponent = RuleBasedOpponent(strategy=blue_strategy)
+    opponent = RuleBasedOpponent()
     base_seed = 0
     episode_index = 0
     try:
@@ -49,7 +48,6 @@ def _worker(
             if command == "reset":
                 base_seed = int(payload)
                 episode_index = 0
-                opponent.reset()
                 observations, info = env.reset(seed=base_seed)
                 connection.send(
                     (
@@ -72,7 +70,6 @@ def _worker(
                 transition_info = dict(info)
                 if done:
                     episode_index += 1
-                    opponent.reset()
                     observations, reset_info = env.reset(
                         seed=base_seed + 1_000_003 * episode_index
                     )
@@ -122,12 +119,9 @@ class ParallelUAVEnvs:
         project_root: str | Path,
         *,
         base_seed: int = 0,
-        blue_strategy: int = 2,
     ) -> None:
         if num_envs < 1:
             raise ValueError("num_envs must be positive")
-        if blue_strategy not in (1, 2, 3):
-            raise ValueError("blue_strategy must be 1, 2 or 3")
         self.num_envs = int(num_envs)
         self.base_seed = int(base_seed)
         context = mp.get_context("spawn")
@@ -143,7 +137,6 @@ class ParallelUAVEnvs:
                     reward_config,
                     render_config,
                     str(Path(project_root).resolve()),
-                    blue_strategy,
                 ),
                 daemon=True,
             )

@@ -179,8 +179,9 @@ def test_collision_threshold_all_team_combinations(make_env,zero_actions,same_te
     env.headings.fill(0)
     env.speeds.fill(100)
     env.step(zero_actions)
-    assert (not env.alive.any()) == collided
-    assert int(env.collision_losses.sum()) == (2 if collided else 0)
+    assert env.alive[(0,0)] and env.alive[second]
+    assert int(env.collision_events.sum()) == (2 if collided else 0)
+    assert not env.combat_kills.any() and not env.weapon_losses.any()
 
 
 def test_swept_collision_with_both_endpoints_outside_and_multi_pair(make_env,zero_actions):
@@ -190,23 +191,45 @@ def test_swept_collision_with_both_endpoints_outside_and_multi_pair(make_env,zer
     env.speeds.fill(150)
     env.step(zero_actions)
     assert np.linalg.norm(env.positions[0,0]-env.positions[1,0]) == pytest.approx(100)
-    assert env.collision_losses.tolist() == [1,1] and env.combat_kills.tolist() == [0,0]
-    env = make_env((0,0),(0,1),(1,0))
+    assert env.collision_events.tolist() == [1,1] and env.combat_kills.tolist() == [0,0]
+    assert env.alive[0,0] and env.alive[1,0]
+    old = env.positions.copy()
+    env.step(zero_actions)
+    assert np.linalg.norm(env.positions[0,0]-old[0,0]) == pytest.approx(150)
+    env = make_env((0,0),(0,1),(1,0),attack_range=1)
     env.positions[0,0],env.positions[0,1],env.positions[1,0] = (0,0),(40,0),(80,0)
     env.headings.fill(0)
     env.speeds.fill(100)
     env.step(zero_actions)
-    assert env.collision_losses.tolist() == [2,1] and env.combat_kills.tolist() == [0,0]
+    assert env.collision_events.tolist() == [2,1] and env.combat_kills.tolist() == [0,0]
+    assert env.alive.sum() == 3
+    env.step(zero_actions)
+    assert env.collision_events.tolist() == [4,2]  # Per-UAV per-step events, not once per episode.
 
 
-def test_collision_victim_cannot_attack(make_env,zero_actions):
+def test_collision_event_does_not_block_same_step_weapon(make_env,zero_actions):
     env = make_env((0,0),(0,1),(1,0))
     env.positions[0,0],env.positions[0,1],env.positions[1,0] = (0,0),(40,0),(700,0)
     env.headings.fill(0)
     env.speeds.fill(100)
     env.step(zero_actions)
-    assert env.alive[1,0] and not env.alive[0].any()
-    assert not env.combat_kills.any() and not env.attack_window_count.any()
+    assert not env.alive[1,0] and env.alive[0,:2].all()
+    assert env.collision_events.tolist() == [2,0]
+    assert env.combat_kills.tolist() == [1,0]
+    assert env.weapon_losses.tolist() == [0,1]
+    assert env.attack_window_count.tolist() == [2,0]
+
+
+def test_collision_events_can_exceed_team_size_without_any_death(make_env,zero_actions):
+    env = make_env((0,0),(1,0),attack_range=1)
+    env.positions[0,0],env.positions[1,0] = (0,0),(40,0)
+    env.speeds.fill(100)
+    env.headings.fill(0)
+    for _ in range(7):
+        _,_,done,_,info = env.step(zero_actions)
+        assert not done and env.alive.sum() == 2
+    assert info['red_collision_events'] == info['blue_collision_events'] == 7
+    assert not env.weapon_losses.any() and not env.oob_losses.any()
 
 
 @pytest.mark.parametrize('axis,sign,heading',[(0,1,0),(0,-1,math.pi),(1,1,math.pi/2),(1,-1,-math.pi/2)])
@@ -218,7 +241,7 @@ def test_oob_death_each_boundary_only_once(make_env,zero_actions,axis,sign,headi
     env.headings[0,0] = heading
     _,_,done,_,info = env.step(zero_actions)
     assert done and not env.alive[0,0] and info['oob'] == [1,0]
-    assert info['weapon_losses'] == info['collision'] == [0,0]
+    assert info['weapon_losses'] == info['collision_events'] == [0,0]
     env._resolve_out_of_bounds()
     assert env.oob_losses.tolist() == [1,0]
 
@@ -230,5 +253,5 @@ def test_oob_precedes_collision_and_weapon(make_env,zero_actions):
     env.speeds.fill(100)
     env.step(zero_actions)
     assert env.oob_losses.tolist() == [1,0]
-    assert env.collision_losses.tolist() == env.weapon_losses.tolist() == [0,0]
+    assert env.collision_events.tolist() == env.weapon_losses.tolist() == [0,0]
     assert env.alive[1,0]

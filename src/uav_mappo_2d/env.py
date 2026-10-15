@@ -17,7 +17,7 @@ def wrap_angle(angle: float | np.ndarray) -> float | np.ndarray:
 
 
 class UAVCombatEnv(gym.Env):
-    """Fixed 5v5 Continuous 2D UAV Combat Baseline V2."""
+    """Literature-constrained continuous 5v5 baseline V2.1."""
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 5}
     N_AGENTS = 5
@@ -25,13 +25,13 @@ class UAVCombatEnv(gym.Env):
     STATE_DIM = 60
     ACTION_DIM = 2
     REWARD_COMPONENTS = (
-        "weapon_reward", "oob_reward", "collision_reward",
-        "terminal_reward", "shaping_reward",
+        "kill_reward", "weapon_loss_reward", "collision_reward",
+        "oob_reward", "terminal_reward",
     )
     EPISODE_METRICS = (
         "red_alive", "blue_alive", "red_combat_kill", "blue_combat_kill",
         "red_weapon_loss", "blue_weapon_loss", "red_oob", "blue_oob",
-        "red_collision", "blue_collision", "red_attack_window", "blue_attack_window",
+        "red_collision_events", "blue_collision_events", "red_attack_window", "blue_attack_window",
         "red_radar_contact_steps", "blue_radar_contact_steps",
     )
 
@@ -55,12 +55,11 @@ class UAVCombatEnv(gym.Env):
         self.combat_kills = np.zeros(2, dtype=np.int32)
         self.weapon_losses = np.zeros(2, dtype=np.int32)
         self.oob_losses = np.zeros(2, dtype=np.int32)
-        self.collision_losses = np.zeros(2, dtype=np.int32)
+        self.collision_events = np.zeros(2, dtype=np.int32)
         self.attack_window_count = np.zeros(2, dtype=np.int32)
         self.radar_contact_steps = np.zeros(2, dtype=np.int32)
         self.step_count = 0
         self.last_winner = None
-        self._potential = 0.0
         self._episode_return = 0.0
         self._episode_rewards = {key: 0.0 for key in self.REWARD_COMPONENTS}
         self._renderer = None
@@ -99,7 +98,7 @@ class UAVCombatEnv(gym.Env):
         self.speeds[:] = self.np_random.uniform(cfg.initial_speed_min, cfg.initial_speed_max, (2, self.N_AGENTS))
         self.alive.fill(True)
         for values in (self.combat_kills, self.weapon_losses, self.oob_losses,
-                       self.collision_losses, self.attack_window_count, self.radar_contact_steps):
+                       self.collision_events, self.attack_window_count, self.radar_contact_steps):
             values.fill(0)
         self.step_count, self.last_winner = 0, None
         self._episode_return = 0.0
@@ -108,7 +107,6 @@ class UAVCombatEnv(gym.Env):
             for agent in range(self.N_AGENTS):
                 self._trails[team][agent].clear()
                 self._trails[team][agent].append(self.positions[team, agent].copy())
-        self._potential = self._compute_potential()
         return self._get_actor_obs(), self._info(
             {key: np.zeros(2) for key in self.REWARD_COMPONENTS}, False
         )
@@ -128,7 +126,6 @@ class UAVCombatEnv(gym.Env):
     def step(self, actions):
         actions = self.validate_actions(actions, self.action_space.shape)
         previous_positions = self.positions.copy()
-        old_potential = self._potential
         self._update_kinematics(actions)
         oob = self._resolve_out_of_bounds()
         collisions = self._resolve_collisions(previous_positions)
@@ -140,15 +137,13 @@ class UAVCombatEnv(gym.Env):
         if terminated and self.last_winner is not None:
             terminal[self.last_winner] = self.reward_config.terminal_reward
             terminal[1 - self.last_winner] = -self.reward_config.terminal_reward
-        self._potential = 0.0 if terminated else self._compute_potential()
         cfg = self.reward_config
-        shaping = cfg.shaping_scale * (cfg.shaping_gamma * self._potential - old_potential)
         components = {
-            "weapon_reward": cfg.weapon_kill_reward * kills - cfg.weapon_loss_penalty * kills[::-1],
+            "kill_reward": cfg.weapon_kill_reward * kills,
+            "weapon_loss_reward": -cfg.weapon_loss_penalty * kills[::-1],
             "oob_reward": -cfg.oob_penalty * oob,
             "collision_reward": -cfg.collision_penalty * collisions,
             "terminal_reward": terminal,
-            "shaping_reward": np.array([shaping, -shaping]),
         }
         totals = sum(components.values())
         for key, values in components.items():
@@ -193,11 +188,11 @@ class UAVCombatEnv(gym.Env):
         np.divide(-np.sum(r0 * dr, axis=1), denominator, out=tau, where=denominator > 1e-12)
         closest = r0 + np.clip(tau, 0, 1)[:, None] * dr
         collided = np.sum(closest * closest, axis=1) <= self.config.collision_distance**2
-        victims = np.unique(np.concatenate((first[collided], second[collided])))
-        losses = np.bincount(victims // self.N_AGENTS, minlength=2).astype(np.int32)
-        self.alive.ravel()[victims] = False
-        self.collision_losses += losses
-        return losses
+        involved = np.unique(np.concatenate((first[collided], second[collided])))
+        events = np.bincount(involved // self.N_AGENTS, minlength=2).astype(np.int32)
+        # Safety events only: even an involved UAV may fire in this same step.
+        self.collision_events += events
+        return events
 
     def team_detected_enemy_mask(self, team):
         detected = np.zeros(self.N_AGENTS, dtype=bool)
@@ -243,24 +238,6 @@ class UAVCombatEnv(gym.Env):
         self.weapon_losses += kills[::-1]
         return kills
 
-    def _pair_quality(self, team, attacker, target_team, target):
-        distance, alpha, beta = self._compute_pair_geometry(team, attacker, target_team, target)
-        cfg, reward = self.config, self.reward_config
-        q_d = np.clip((cfg.radar_range - distance) / (cfg.radar_range - cfg.attack_range), 0, 1)
-        return float(reward.potential_distance_weight * q_d
-                     + reward.potential_ata_weight * (1 + math.cos(alpha)) / 2
-                     + reward.potential_aspect_weight * (1 + math.cos(beta)) / 2)
-
-    def _team_attack_quality(self, team):
-        attackers = np.flatnonzero(self.alive[team])
-        targets = np.flatnonzero(self.team_detected_enemy_mask(team))
-        if not len(attackers) or not len(targets):
-            return 0.0
-        return float(np.mean([max(self._pair_quality(team, i, 1 - team, j) for i in attackers) for j in targets]))
-
-    def _compute_potential(self):
-        return self._team_attack_quality(0) - self._team_attack_quality(1)
-
     def _is_terminal(self):
         return bool(not self.alive[0].any() or not self.alive[1].any() or self.step_count >= self.config.episode_steps)
 
@@ -305,7 +282,7 @@ class UAVCombatEnv(gym.Env):
         red, blue = self.alive.sum(axis=1)
         return dict(zip(self.EPISODE_METRICS, (
             int(red), int(blue), *map(int, self.combat_kills), *map(int, self.weapon_losses),
-            *map(int, self.oob_losses), *map(int, self.collision_losses),
+            *map(int, self.oob_losses), *map(int, self.collision_events),
             *map(int, self.attack_window_count), *map(int, self.radar_contact_steps),
         )))
 
@@ -317,11 +294,11 @@ class UAVCombatEnv(gym.Env):
             "alive": self.alive.sum(axis=1).tolist(), "active_masks": self.alive.astype(np.float32).copy(),
             "global_state": self.global_state(), "combat_kills": self.combat_kills.tolist(),
             "weapon_losses": self.weapon_losses.tolist(), "oob": self.oob_losses.tolist(),
-            "collision": self.collision_losses.tolist(), "attack_window_count": self.attack_window_count.tolist(),
+            "collision_events": self.collision_events.tolist(), "attack_window_count": self.attack_window_count.tolist(),
             "radar_contact_steps": self.radar_contact_steps.tolist(), **self._counts(),
             **{key: float(value[0]) for key, value in components.items()},
             "team_reward_components": {key: value.tolist() for key, value in components.items()},
-            "total_reward": float(totals[0]), "team_rewards": totals.tolist(), "potential": self._potential,
+            "total_reward": float(totals[0]), "team_rewards": totals.tolist(),
         }
         if terminated:
             info["episode_summary"] = {

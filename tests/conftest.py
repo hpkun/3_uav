@@ -8,9 +8,9 @@ from uav_mappo_2d.env import UAVCombatEnv
 
 @pytest.fixture
 def make_env():
-    def make(*entities, shaping_scale=0., **overrides):
+    def make(*entities, **overrides):
         env = UAVCombatEnv(replace(EnvironmentConfig(), **overrides),
-                           replace(RewardConfig(), shaping_scale=shaping_scale),
+                           RewardConfig(),
                            RenderConfig(width=320, height=320))
         env.reset(seed=17)
         if entities:

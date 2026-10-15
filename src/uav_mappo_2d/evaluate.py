@@ -51,12 +51,11 @@ def evaluate_policy(
         render_mode="rgb_array" if gif_path else None,
         project_root=Path.cwd(),
     )
-    opponent = RuleBasedOpponent(strategy=config.training.blue_strategy)
+    opponent = RuleBasedOpponent()
     rows: list[dict[str, float | str]] = []
     frames: list[np.ndarray] = []
     for episode in range(episodes):
         observations, info = env.reset(seed=seed_start + episode)
-        opponent.reset()
         done = False
         if episode == 0 and gif_path:
             frames.append(env.render())
@@ -102,13 +101,23 @@ def evaluate_policy(
             np.mean([row["episode_length"] for row in rows])
         ),
         "mean_return": float(np.mean([row["return"] for row in rows])),
+        "red_collision_episode_rate": float(np.mean([row['red_collision_events'] > 0 for row in rows])),
+        "blue_collision_episode_rate": float(np.mean([row['blue_collision_events'] > 0 for row in rows])),
+        "collision_episode_rate": float(np.mean([
+            row['red_collision_events'] + row['blue_collision_events'] > 0 for row in rows
+        ])),
+        "weapon_death_share": float(
+            sum(row['red_weapon_loss'] + row['blue_weapon_loss'] for row in rows)
+            / max(sum(row['red_weapon_loss'] + row['blue_weapon_loss']
+                      + row['red_oob'] + row['blue_oob'] for row in rows), 1)
+        ),
         **{key: float(np.mean([row[key] for row in rows])) for key in UAVCombatEnv.REWARD_COMPONENTS},
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate deterministic tanh-mean MAPPO in fixed 5v5 continuous V2"
+        description="Evaluate deterministic tanh-mean MAPPO in fixed 5v5 continuous V2.1"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--checkpoint", required=True)
@@ -116,7 +125,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed-start", type=int, default=100_000)
     parser.add_argument("--device", default=None)
     parser.add_argument("--gif", default=None)
-    parser.add_argument("--blue-strategy", type=int, choices=(1, 2, 3), default=None)
     parser.add_argument("--output", default=None, help="Optional metrics JSON file")
     return parser
 
@@ -124,8 +132,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
-    if args.blue_strategy is not None:
-        config.training.blue_strategy = args.blue_strategy
     device = resolve_device(args.device or config.training.device)
     policy = MAPPO(
         UAVCombatEnv.OBS_DIM, UAVCombatEnv.STATE_DIM, UAVCombatEnv.N_AGENTS,

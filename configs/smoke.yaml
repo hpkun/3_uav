@@ -6,7 +6,6 @@ mappo:
   minibatch_size: 32
 
 training:
-  blue_strategy: 2
   total_env_steps: 1280
   parallel_envs: 2
   rollout_length: 64
@@ -14,5 +13,5 @@ training:
   checkpoint_interval_steps: 640
   evaluation_interval_steps: 640
   evaluation_episodes: 4
-  output_dir: "runs/smoke_v2_5v5"
+  output_dir: "runs/smoke_v2_1_5v5"
   device: "cpu"

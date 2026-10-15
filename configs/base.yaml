@@ -21,24 +21,14 @@ environment:
   attack_ata_degrees: 30.0
   attack_aspect_degrees: 45.0
   collision_distance: 50.0
-  blue_boundary_margin: 1000.0
-  blue_collision_avoidance_distance: 300.0
-  blue_assignment_interval: 5
-  blue_tail_distance: 700.0
-  blue_far_distance: 2000.0
-  blue_speed_advantage: 10.0
+  blue_escape_distance: null
 
 reward:
-  weapon_kill_reward: 5.0
-  weapon_loss_penalty: 5.0
-  oob_penalty: 5.0
+  weapon_kill_reward: 10.0
+  weapon_loss_penalty: 10.0
+  oob_penalty: 20.0
   collision_penalty: 5.0
   terminal_reward: 20.0
-  shaping_scale: 0.5
-  shaping_gamma: 0.99
-  potential_distance_weight: 0.25
-  potential_ata_weight: 0.375
-  potential_aspect_weight: 0.375
 
 render:
   width: 800
@@ -63,7 +53,6 @@ mappo:
   minibatch_size: 512
 
 training:
-  blue_strategy: 2
   total_env_steps: 2000000
   parallel_envs: 16
   rollout_length: 128
@@ -71,5 +60,5 @@ training:
   checkpoint_interval_steps: 100000
   evaluation_interval_steps: 100000
   evaluation_episodes: 100
-  output_dir: runs/v2_5v5_seed7
+  output_dir: runs/v2_1_5v5_seed7
   device: cuda

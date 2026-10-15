@@ -8,10 +8,9 @@ from uav_mappo_2d.env import UAVCombatEnv
 from uav_mappo_2d.parallel_env import ParallelUAVEnvs
 
 
-@pytest.mark.parametrize('strategy',[1,2,3])
-def test_parallel_continuous_shapes_and_exact_terminal_reset(tmp_path,strategy):
+def test_parallel_continuous_shapes_and_exact_terminal_reset(tmp_path):
     cfg = replace(EnvironmentConfig(),episode_steps=1)
-    with ParallelUAVEnvs(2,cfg,RewardConfig(),RenderConfig(),tmp_path,base_seed=9,blue_strategy=strategy) as environments:
+    with ParallelUAVEnvs(2,cfg,RewardConfig(),RenderConfig(),tmp_path,base_seed=9) as environments:
         assert len(set(environments.worker_pids)) == 2 and os.getpid() not in environments.worker_pids
         obs,states,active,infos = environments.reset()
         assert obs.shape == (2,5,68) and states.shape == (2,60) and active.shape == (2,5)

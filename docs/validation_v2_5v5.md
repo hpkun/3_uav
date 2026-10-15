@@ -1,3 +1,7 @@
+# HISTORICAL / SUPERSEDED BY V2.1
+
+本文保留V2原始行为数据，不代表当前V2.1。V2.1的碰撞是非致死安全事件，已删除potential及旧Blue机制；当前验收见validation_v2_1_5v5.md。
+
 # V2 固定5v5连续对抗：实际验收报告
 
 日期：2026-10-15。运行环境：WSL Ubuntu，conda uav；项目路径/mnt/c/Users/HPK/Desktop/3_uav。

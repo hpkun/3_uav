@@ -8,14 +8,24 @@ from uav_mappo_2d.mappo import MAPPO
 from uav_mappo_2d.train import build_parser,run_training
 
 
-def test_v2_config_defaults_and_no_active_old_courses():
+def test_v2_1_config_defaults_and_no_active_old_courses():
     cfg = load_config('configs/base.yaml')
     defaults = ProjectConfig()
     assert cfg.environment == defaults.environment and cfg.reward == defaults.reward
-    assert cfg.mappo == defaults.mappo and cfg.training.blue_strategy == 2
+    assert cfg.mappo == defaults.mappo and cfg.training == defaults.training
+    assert cfg.environment.blue_escape_distance is None
+    assert set(vars(cfg.reward)) == {
+        'weapon_kill_reward','weapon_loss_penalty','collision_penalty','oob_penalty','terminal_reward'}
+    for name in ['blue_strategy','blue_tail_distance','blue_assignment_interval',
+                 'blue_collision_avoidance_distance','blue_boundary_margin',
+                 'blue_far_distance','blue_speed_advantage']:
+        assert not hasattr(cfg.environment,name) and not hasattr(cfg.training,name)
+    assert not any(name.startswith(('potential_','shaping_')) for name in vars(cfg.reward))
     assert not list(Path('configs').glob('xu_course*.yaml'))
     with pytest.raises(SystemExit):
         build_parser().parse_args(['--resume','x','--init-checkpoint','y'])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(['--blue-strategy','2'])
 
 
 def test_weights_only_initialization_and_resume_semantics(tmp_path):

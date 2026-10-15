@@ -1,4 +1,4 @@
-"""Read-only diagnostics around actual V2 collision/weapon transitions; no tuning."""
+"""Observe actual V2.1 chase/escape transitions, weapons and OOB without tuning."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ import numpy as np
 
 from sanity_check import pursuit_red_actions
 from uav_mappo_2d.config import load_config
-from uav_mappo_2d.env import UAVCombatEnv, wrap_angle
+from uav_mappo_2d.env import UAVCombatEnv
 from uav_mappo_2d.opponents import RuleBasedOpponent
 
 
@@ -18,102 +18,87 @@ def audit(mode, episodes, seed_start):
     cfg = load_config('configs/base.yaml')
     env = UAVCombatEnv(cfg.environment, cfg.reward, cfg.render)
     counts = Counter()
-    collisions, weapons = [], []
+    cycles, weapons, oob_examples = [], [], []
     for episode in range(episodes):
         seed = seed_start + episode
         env.reset(seed=seed)
-        controllers = [RuleBasedOpponent(2), RuleBasedOpponent(2)]
+        red, blue = RuleBasedOpponent(), RuleBasedOpponent()
         history = deque(maxlen=5)
+        phase_history = [deque(maxlen=3) for _ in range(5)]
         done = False
         while not done:
-            before = env.positions.copy()
+            previous = env.positions.copy()
             old_alive = env.alive.copy()
-            headings = env.headings.copy()
-            priorities = {}
-            for team in range(2):
-                detected = env.team_detected_enemy_mask(team)
-                for agent in np.flatnonzero(env.alive[team]):
-                    if team == 0 and mode == 'pursuit-vs-rule':
-                        priority = 'direct-pursuit'
-                    elif controllers[team].boundary_point(env, team, agent) is not None:
-                        priority = 'boundary'
-                    elif controllers[team]._avoidance(env, team, agent, detected) is not None:
-                        priority = 'avoidance'
-                    else:
-                        priority = 'tail-or-patrol'
-                    priorities[(team, int(agent))] = priority
-            red = controllers[0].act(env, 0) if mode == 'rule-vs-rule' else pursuit_red_actions(env)
-            actions = np.stack([red, controllers[1].act(env, 1)])
-            frame = {'step_before': env.step_count, 'positions': before.tolist(),
-                     'headings_degrees': np.degrees(headings).tolist(), 'actions': actions.tolist()}
-            history.append(frame)
-            kills_before = env.combat_kills.copy()
-            _, _, done, _, _ = env.step(actions)
-            inside = old_alive & np.all(np.abs(env.positions) <= cfg.environment.map_size / 2, axis=-1)
-            indices = np.flatnonzero(inside.ravel())
-            p0, p1 = before.reshape(-1, 2), env.positions.reshape(-1, 2)
-            collision_victims = set()
-            for n, first in enumerate(indices):
-                for second in indices[n+1:]:
-                    r0 = p0[first] - p0[second]
-                    dr = (p1[first]-p0[first]) - (p1[second]-p0[second])
-                    tau = float(np.clip(-np.dot(r0, dr) / np.dot(dr, dr), 0, 1)) if np.dot(dr, dr) > 1e-12 else 0.
-                    closest = float(np.linalg.norm(r0 + tau * dr))
-                    if closest > cfg.environment.collision_distance:
-                        continue
-                    collision_victims.update([int(first), int(second)])
-                    t1, i1 = divmod(int(first), 5)
-                    t2, i2 = divmod(int(second), 5)
-                    category = 'same_team' if t1 == t2 else 'cross_team'
-                    counts['collision_pairs'] += 1
-                    counts[category] += 1
-                    angle = abs(math.degrees(float(wrap_angle(headings[t1,i1] - headings[t2,i2]))))
-                    counts['opposed_heading_gt135'] += int(angle > 135)
-                    counts['parallel_heading_lt45'] += int(angle < 45)
-                    start_distance = float(np.linalg.norm(r0))
-                    counts['start_distance_lt300'] += int(start_distance < 300)
-                    avoided = sum(priorities[(t,i)] == 'avoidance' for t,i in [(t1,i1),(t2,i2)])
-                    counts['both_avoiding'] += int(avoided == 2)
-                    counts['one_avoiding'] += int(avoided == 1)
-                    counts['neither_avoiding'] += int(avoided == 0)
-                    if len(collisions) < 5:
-                        collisions.append({'seed': seed, 'step': env.step_count,
-                            'pair': [[t1,i1],[t2,i2]], 'category': category,
-                            'heading_difference_degrees': angle, 'distance_before': start_distance,
-                            'distance_after': float(np.linalg.norm(p1[first]-p1[second])),
-                            'swept_distance': closest, 'tau': tau,
-                            'priority': [priorities[(t1,i1)], priorities[(t2,i2)]],
-                            'preceding_frames': list(history)})
-            if np.any(env.combat_kills > kills_before):
-                counts['weapon_kills'] += int(np.sum(env.combat_kills-kills_before))
-                valid = inside.ravel().copy()
-                valid[list(collision_victims)] = False
-                for first in np.flatnonzero(valid):
-                    t, i = divmod(int(first), 5)
-                    for second in np.flatnonzero(valid):
-                        ot, j = divmod(int(second), 5)
-                        if t == ot:
-                            continue
-                        d, alpha, beta = env._compute_pair_geometry(t, i, ot, j)
-                        if d <= 1000 and abs(alpha) <= math.radians(30)+1e-12 and abs(beta) <= math.radians(45)+1e-12 and len(weapons) < 5:
-                            weapons.append({'seed': seed, 'step': env.step_count,
-                                'attacker': [t,i], 'target': [ot,j], 'distance': d,
-                                'ata_degrees': math.degrees(alpha), 'aspect_degrees': math.degrees(beta),
-                                'preceding_frames': list(history)})
+            headings, speeds = env.headings.copy(), env.speeds.copy()
+            detected = env.team_detected_enemy_mask(1)
+            for agent in np.flatnonzero(env.alive[1]):
+                target = blue.nearest_target(env,1,agent,detected)
+                distance = (None if target is None else float(np.linalg.norm(
+                    env.positions[0,target]-env.positions[1,agent])))
+                if blue.boundary_heading(env,1,agent) is not None:
+                    phase = 'boundary'
+                elif target is None:
+                    phase = 'straight'
+                else:
+                    threshold = cfg.environment.blue_escape_distance
+                    threshold = cfg.environment.attack_range if threshold is None else threshold
+                    phase = 'escape' if distance <= threshold else 'chase'
+                counts['blue_'+phase+'_agent_steps'] += 1
+                changes = phase_history[agent]
+                if not changes or changes[-1]['phase'] != phase:
+                    changes.append({'phase':phase,'step_before':env.step_count,
+                                    'target':None if target is None else int(target),'distance':distance})
+                    if [row['phase'] for row in changes] == ['chase','escape','chase']:
+                        counts['blue_chase_escape_chase_cycles'] += 1
+                        if len(cycles) < 5:
+                            cycles.append({'seed':seed,'blue_agent':int(agent),'transitions':list(changes)})
+            actions = np.stack([red.act(env,0) if mode == 'rule-vs-rule' else pursuit_red_actions(env),
+                                blue.act(env,1)])
+            history.append({'step_before':env.step_count,'positions':previous.tolist(),
+                            'headings_degrees':np.degrees(headings).tolist(),
+                            'speeds':speeds.tolist(),'actions':actions.tolist()})
+            kill_before, oob_before = env.combat_kills.copy(), env.oob_losses.copy()
+            _,_,done,_,info = env.step(actions)
+            counts['weapon_kills'] += int((env.combat_kills-kill_before).sum())
+            counts['oob_deaths'] += int((env.oob_losses-oob_before).sum())
+            inside = old_alive & np.all(np.abs(env.positions) <= cfg.environment.map_size/2,axis=-1)
+            for team,agent in zip(*np.where(old_alive & ~inside)):
+                if len(oob_examples) < 5:
+                    oob_examples.append({'seed':seed,'step':env.step_count,'team':int(team),
+                        'agent':int(agent),'position_before':previous[team,agent].tolist(),
+                        'position_after':env.positions[team,agent].tolist(),
+                        'nominal_prediction':(previous[team,agent]+speeds[team,agent]*np.array([
+                            math.cos(headings[team,agent]),math.sin(headings[team,agent])])*cfg.environment.dt).tolist(),
+                        'action':actions[team,agent].tolist(),'preceding_frames':list(history)})
+            if np.any(env.combat_kills > kill_before):
+                for team in range(2):
+                    for attacker in np.flatnonzero(inside[team]):
+                        legal = []
+                        for target in np.flatnonzero(inside[1-team]):
+                            d,alpha,beta = env._compute_pair_geometry(team,attacker,1-team,target)
+                            if d <= cfg.environment.attack_range and abs(alpha) <= math.radians(cfg.environment.attack_ata_degrees)+1e-12 and abs(beta) <= math.radians(cfg.environment.attack_aspect_degrees)+1e-12:
+                                legal.append((d,int(target),alpha,beta))
+                        if legal and len(weapons) < 5:
+                            d,target,alpha,beta = min(legal)
+                            weapons.append({'seed':seed,'step':env.step_count,'attacker':[team,int(attacker)],
+                                'target':[1-team,target],'distance':d,'ata_degrees':math.degrees(alpha),
+                                'aspect_degrees':math.degrees(beta),'preceding_frames':list(history)})
+        counts['red_collision_events'] += int(env.collision_events[0])
+        counts['blue_collision_events'] += int(env.collision_events[1])
     env.close()
-    return {'mode': mode, 'episodes': episodes, 'seed_start': seed_start,
-            'counts': dict(counts), 'collision_examples': collisions, 'weapon_examples': weapons}
+    return {'mode':mode,'episodes':episodes,'seed_start':seed_start,'counts':dict(counts),
+            'blue_cycle_examples':cycles,'weapon_examples':weapons,'oob_examples':oob_examples}
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--episodes', type=int, default=20)
-    parser.add_argument('--seed-start', type=int, default=200000)
-    parser.add_argument('--output', default='runs/v2_validation/behavioral_audit.json')
+    parser.add_argument('--episodes',type=int,default=20)
+    parser.add_argument('--seed-start',type=int,default=200000)
+    parser.add_argument('--output',default='runs/v2_1_validation/behavioral_audit.json')
     args = parser.parse_args()
-    results = {mode: audit(mode, args.episodes, args.seed_start)
-               for mode in ['rule-vs-rule', 'pursuit-vs-rule']}
+    results = {mode:audit(mode,args.episodes,args.seed_start)
+               for mode in ['rule-vs-rule','pursuit-vs-rule']}
     path = Path(args.output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(results, indent=2)+'\n', encoding='utf-8')
-    print(json.dumps({mode: row['counts'] for mode, row in results.items()}, indent=2))
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(json.dumps(results,indent=2)+'\n',encoding='utf-8')
+    print(json.dumps({mode:row['counts'] for mode,row in results.items()},indent=2))

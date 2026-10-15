@@ -59,13 +59,13 @@ def _training_log(
         f"{_mean(rows, 'blue_combat_kill'):.2f} "
         f"weapon_loss(R/B)={_mean(rows, 'red_weapon_loss'):.2f}/{_mean(rows, 'blue_weapon_loss'):.2f} "
         f"oob(R/B)={_mean(rows, 'red_oob'):.2f}/{_mean(rows, 'blue_oob'):.2f} "
-        f"collision(R/B)={_mean(rows, 'red_collision'):.2f}/{_mean(rows, 'blue_collision'):.2f} "
+        f"collision_events(R/B)={_mean(rows, 'red_collision_events'):.2f}/{_mean(rows, 'blue_collision_events'):.2f} "
         f"window(R/B)={_mean(rows, 'red_attack_window'):.2f}/{_mean(rows, 'blue_attack_window'):.2f} "
         f"contact(R/B)={_mean(rows, 'red_radar_contact_steps'):.1f}/{_mean(rows, 'blue_radar_contact_steps'):.1f} "
-        f"reward(weapon/oob/collision/terminal/shape)="
-        f"{_mean(rows, 'weapon_reward'):.2f}/{_mean(rows, 'oob_reward'):.2f}/"
-        f"{_mean(rows, 'collision_reward'):.2f}/{_mean(rows, 'terminal_reward'):.2f}/"
-        f"{_mean(rows, 'shaping_reward'):.3f} "
+        f"reward(kill/loss/collision/oob/terminal)="
+        f"{_mean(rows, 'kill_reward'):.2f}/{_mean(rows, 'weapon_loss_reward'):.2f}/"
+        f"{_mean(rows, 'collision_reward'):.2f}/{_mean(rows, 'oob_reward'):.2f}/"
+        f"{_mean(rows, 'terminal_reward'):.2f} "
         f"length={_mean(rows, 'episode_length'):.1f} "
         f"actor={metrics['actor_loss']:.4f} critic={metrics['critic_loss']:.4f} "
         f"entropy={metrics['entropy']:.4f} kl={metrics['approx_kl']:.5f} "
@@ -180,13 +180,12 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
         config.render,
         Path.cwd(),
         base_seed=config.seed + global_step,
-        blue_strategy=training.blue_strategy,
     )
     observations, states, active_masks, _ = environments.reset()
     print(
         f"[START] total_env_steps={training.total_env_steps} "
         f"rollout={training.rollout_length} parallel={training.parallel_envs} "
-        f"device={device} blue_strategy={training.blue_strategy} pids={environments.worker_pids}",
+        f"device={device} pids={environments.worker_pids}",
         flush=True,
     )
     try:
@@ -333,13 +332,12 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train continuous MAPPO in Fixed 5v5 2D UAV Combat Baseline V2"
+        description="Train continuous MAPPO in Fixed 5v5 2D UAV Combat Baseline V2.1"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     initialization = parser.add_mutually_exclusive_group()
     initialization.add_argument("--resume", default=None)
     initialization.add_argument("--init-checkpoint", default=None)
-    parser.add_argument("--blue-strategy", type=int, choices=(1, 2, 3), default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--device", default=None)
@@ -358,8 +356,6 @@ def main() -> None:
         config.training.device = args.device
     if args.seed is not None:
         config.seed = args.seed
-    if args.blue_strategy is not None:
-        config.training.blue_strategy = args.blue_strategy
     checkpoint = run_training(config, resume=args.resume, init_checkpoint=args.init_checkpoint)
     print(f"[DONE] checkpoint={checkpoint}")
 
