@@ -17,31 +17,26 @@ def wrap_angle(angle: float | np.ndarray) -> float | np.ndarray:
 
 
 class UAVCombatEnv(gym.Env):
-    """Xu-thesis-aligned fixed 5v5 baseline; conventions are documented separately."""
+    """Fixed 5v5 Continuous 2D UAV Combat Baseline V2."""
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 5}
     N_AGENTS = 5
     OBS_DIM = 68
     STATE_DIM = 60
-    N_ACTIONS = 10
-    NO_OP = 2
-    SPEED_DELTAS = np.array([-1, -.5, 0, .5, 1, 0, 0, 0, 0, 0], dtype=np.float64)
-    HEADING_DELTAS = np.deg2rad([0, 0, 0, 0, 0, -5, -2, 0, 2, 5])
-    RIGHT_ACTIONS = (5, 6, 7)
-    LEFT_ACTIONS = (7, 8, 9)
+    ACTION_DIM = 2
     REWARD_COMPONENTS = (
-        "kill_reward", "own_loss_reward", "terminal_reward", "timeout_reward",
-        "distance_reward", "attack_angle_reward", "collision_avoidance_reward",
+        "weapon_reward", "oob_reward", "collision_reward",
+        "terminal_reward", "shaping_reward",
+    )
+    EPISODE_METRICS = (
+        "red_alive", "blue_alive", "red_combat_kill", "blue_combat_kill",
+        "red_weapon_loss", "blue_weapon_loss", "red_oob", "blue_oob",
+        "red_collision", "blue_collision", "red_attack_window", "blue_attack_window",
+        "red_radar_contact_steps", "blue_radar_contact_steps",
     )
 
-    def __init__(
-        self,
-        config: EnvironmentConfig | None = None,
-        reward_config: RewardConfig | None = None,
-        render_config: RenderConfig | None = None,
-        render_mode: str | None = None,
-        project_root: str | Path | None = None,
-    ) -> None:
+    def __init__(self, config=None, reward_config=None, render_config=None,
+                 render_mode=None, project_root=None) -> None:
         super().__init__()
         self.config = config or EnvironmentConfig()
         self.reward_config = reward_config or RewardConfig()
@@ -51,140 +46,144 @@ class UAVCombatEnv(gym.Env):
         self.render_mode = render_mode
         self.project_root = Path(project_root or Path(__file__).resolve().parents[2])
         self.n_agents, self.obs_dim, self.state_dim = self.N_AGENTS, self.OBS_DIM, self.STATE_DIM
-        self.action_space = spaces.MultiDiscrete(np.full((2, self.N_AGENTS), self.N_ACTIONS))
-        # No physical boundary clamp: normalized x/y and distances may exceed one.
-        self.observation_space = spaces.Box(
-            -np.inf, np.inf, shape=(2, self.N_AGENTS, self.OBS_DIM), dtype=np.float32
-        )
+        self.action_space = spaces.Box(-1., 1., (2, self.N_AGENTS, self.ACTION_DIM), np.float32)
+        self.observation_space = spaces.Box(-1., 1., (2, self.N_AGENTS, self.OBS_DIM), np.float32)
         self.positions = np.zeros((2, self.N_AGENTS, 2), dtype=np.float64)
         self.speeds = np.zeros((2, self.N_AGENTS), dtype=np.float64)
         self.headings = np.zeros((2, self.N_AGENTS), dtype=np.float64)
         self.alive = np.ones((2, self.N_AGENTS), dtype=bool)
         self.combat_kills = np.zeros(2, dtype=np.int32)
+        self.weapon_losses = np.zeros(2, dtype=np.int32)
+        self.oob_losses = np.zeros(2, dtype=np.int32)
         self.collision_losses = np.zeros(2, dtype=np.int32)
-        self._ever_outside = np.zeros((2, self.N_AGENTS), dtype=bool)
+        self.attack_window_count = np.zeros(2, dtype=np.int32)
+        self.radar_contact_steps = np.zeros(2, dtype=np.int32)
         self.step_count = 0
-        self.last_winner: int | None = None
+        self.last_winner = None
+        self._potential = 0.0
         self._episode_return = 0.0
         self._episode_rewards = {key: 0.0 for key in self.REWARD_COMPONENTS}
         self._renderer = None
-        self._trails = [
-            [deque(maxlen=self.render_config.trail_length) for _ in range(self.N_AGENTS)]
-            for _ in range(2)
-        ]
+        self._trails = [[deque(maxlen=self.render_config.trail_length)
+                         for _ in range(self.N_AGENTS)] for _ in range(2)]
 
     @property
     def elapsed_time(self) -> float:
         return self.step_count * self.config.dt
 
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
+    def _sample_spawn_y(self) -> np.ndarray:
+        cfg = self.config
+        for _ in range(1000):
+            values = self.np_random.uniform(cfg.spawn_y_min, cfg.spawn_y_max, self.N_AGENTS)
+            if np.all(np.diff(np.sort(values)) >= cfg.min_spawn_y_separation):
+                return values
+        # Independent jitter and ID permutation preserve team independence in fallback.
+        slack = (cfg.spawn_y_max - cfg.spawn_y_min) / 4 - cfg.min_spawn_y_separation
+        jitter = min(100.0, slack / 4)
+        values = np.linspace(cfg.spawn_y_min + jitter, cfg.spawn_y_max - jitter, self.N_AGENTS)
+        values += self.np_random.uniform(-jitter, jitter, self.N_AGENTS)
+        return self.np_random.permutation(values)
+
+    def reset(self, *, seed=None, options=None):
         del options
         super().reset(seed=seed)
         cfg = self.config
-        base_y = (np.arange(self.N_AGENTS) - (self.N_AGENTS - 1) / 2) * cfg.spawn_y_spacing
-        jitter = self.np_random.uniform(-cfg.spawn_jitter, cfg.spawn_jitter, (2, self.N_AGENTS, 2))
-        self.positions[0, :, 0] = -cfg.spawn_x + jitter[0, :, 0]
-        self.positions[1, :, 0] = cfg.spawn_x + jitter[1, :, 0]
-        self.positions[:, :, 1] = base_y + jitter[:, :, 1]
-        self.headings[0].fill(0.0)
-        self.headings[1].fill(math.pi)
-        self.speeds.fill(cfg.initial_speed)
+        for team in range(2):
+            x = self.np_random.uniform(cfg.spawn_x_min, cfg.spawn_x_max, self.N_AGENTS)
+            self.positions[team, :, 0] = -x if team == 0 else x
+            self.positions[team, :, 1] = self._sample_spawn_y()
+        jitter = self.np_random.uniform(-math.radians(cfg.heading_jitter_degrees),
+                                       math.radians(cfg.heading_jitter_degrees), (2, self.N_AGENTS))
+        self.headings[0] = jitter[0]
+        self.headings[1] = wrap_angle(math.pi + jitter[1])
+        self.speeds[:] = self.np_random.uniform(cfg.initial_speed_min, cfg.initial_speed_max, (2, self.N_AGENTS))
         self.alive.fill(True)
-        self.combat_kills.fill(0)
-        self.collision_losses.fill(0)
-        self._ever_outside.fill(False)
-        self.step_count = 0
-        self.last_winner = None
+        for values in (self.combat_kills, self.weapon_losses, self.oob_losses,
+                       self.collision_losses, self.attack_window_count, self.radar_contact_steps):
+            values.fill(0)
+        self.step_count, self.last_winner = 0, None
         self._episode_return = 0.0
         self._episode_rewards = {key: 0.0 for key in self.REWARD_COMPONENTS}
         for team in range(2):
             for agent in range(self.N_AGENTS):
                 self._trails[team][agent].clear()
                 self._trails[team][agent].append(self.positions[team, agent].copy())
+        self._potential = self._compute_potential()
         return self._get_actor_obs(), self._info(
-            {key: np.zeros(2) for key in self.REWARD_COMPONENTS}, terminated=False
+            {key: np.zeros(2) for key in self.REWARD_COMPONENTS}, False
         )
 
-    def available_action_masks(self, team: int = 0) -> np.ndarray:
-        """Nearest-aircraft 450m constraint; ties use flattened team/agent ID."""
-        masks = np.ones((self.N_AGENTS, self.N_ACTIONS), dtype=bool)
-        flat_positions, flat_alive = self.positions.reshape(-1, 2), self.alive.ravel()
-        for agent in range(self.N_AGENTS):
-            if not self.alive[team, agent]:
-                masks[agent] = False
-                masks[agent, self.NO_OP] = True
-                continue
-            own_id = team * self.N_AGENTS + agent
-            candidates = np.flatnonzero(flat_alive).tolist()
-            candidates.remove(own_id)
-            if not candidates:
-                continue
-            delta = flat_positions[candidates] - flat_positions[own_id]
-            distances = np.linalg.norm(delta, axis=1)
-            nearest = int(np.argmin(distances))
-            if distances[nearest] <= self.config.collision_avoidance_distance:
-                los = math.atan2(float(delta[nearest, 1]), float(delta[nearest, 0]))
-                alpha = float(wrap_angle(los - self.headings[team, agent]))
-                subset = self.LEFT_ACTIONS if alpha < -1e-12 else self.RIGHT_ACTIONS
-                masks[agent] = False
-                masks[agent, list(subset)] = True
-        return masks
+    @staticmethod
+    def validate_actions(actions, expected_shape) -> np.ndarray:
+        values = np.asarray(actions)
+        if values.shape != expected_shape:
+            raise ValueError(f"Expected action shape {expected_shape}, got {values.shape}")
+        if not np.issubdtype(values.dtype, np.number) or not np.isfinite(values).all():
+            raise ValueError("Continuous actions must be finite numbers")
+        if np.any(np.abs(values) > 1.0 + 1e-6):
+            raise ValueError("Continuous actions must be in [-1,1]")
+        # Clip only floating-point tolerance; invalid policy outputs are rejected above.
+        return np.clip(values, -1., 1.).astype(np.float32)
 
-    def step(self, actions: np.ndarray):
-        actions = np.asarray(actions)
-        if actions.shape != self.action_space.shape:
-            raise ValueError(f"Expected actions {self.action_space.shape}, got {actions.shape}")
-        if not np.issubdtype(actions.dtype, np.integer):
-            raise ValueError("Actions must be integers in [0,9]")
-        if np.any((actions < 0) | (actions >= self.N_ACTIONS)):
-            raise ValueError("Actions must be integers in [0,9]")
-        masks = np.stack([self.available_action_masks(team) for team in range(2)])
-        if not np.all(np.take_along_axis(masks, actions[..., None], axis=-1)):
-            raise ValueError("Action violates the current collision-avoidance mask")
+    def step(self, actions):
+        actions = self.validate_actions(actions, self.action_space.shape)
         previous_positions = self.positions.copy()
-        previous_metrics = self._enemy_metrics()
+        old_potential = self._potential
         self._update_kinematics(actions)
-        self._ever_outside |= self.alive & self.outside_map_mask()
+        oob = self._resolve_out_of_bounds()
         collisions = self._resolve_collisions(previous_positions)
         kills = self._resolve_attacks()
         self.step_count += 1
         terminated = self._is_terminal()
         self.last_winner = self._determine_winner() if terminated else None
-        components = self._reward_components(previous_positions, previous_metrics, kills, collisions, terminated)
+        terminal = np.zeros(2)
+        if terminated and self.last_winner is not None:
+            terminal[self.last_winner] = self.reward_config.terminal_reward
+            terminal[1 - self.last_winner] = -self.reward_config.terminal_reward
+        self._potential = 0.0 if terminated else self._compute_potential()
+        cfg = self.reward_config
+        shaping = cfg.shaping_scale * (cfg.shaping_gamma * self._potential - old_potential)
+        components = {
+            "weapon_reward": cfg.weapon_kill_reward * kills - cfg.weapon_loss_penalty * kills[::-1],
+            "oob_reward": -cfg.oob_penalty * oob,
+            "collision_reward": -cfg.collision_penalty * collisions,
+            "terminal_reward": terminal,
+            "shaping_reward": np.array([shaping, -shaping]),
+        }
         totals = sum(components.values())
-        for key in self.REWARD_COMPONENTS:
-            self._episode_rewards[key] += float(components[key][0])
+        for key, values in components.items():
+            self._episode_rewards[key] += float(values[0])
         self._episode_return += float(totals[0])
         rewards = np.repeat(totals[:, None], self.N_AGENTS, axis=1).astype(np.float32)
         return self._get_actor_obs(), rewards, terminated, False, self._info(components, terminated)
 
-    def _update_kinematics(self, actions: np.ndarray) -> None:
+    def _update_kinematics(self, actions):
         cfg = self.config
         for team in range(2):
             active = self.alive[team]
-            # Eq. (3.1): position uses v_t and rho_t, actions affect the next state.
-            self.positions[team, active, 0] += self.speeds[team, active] * np.cos(self.headings[team, active]) * cfg.dt
-            self.positions[team, active, 1] += self.speeds[team, active] * np.sin(self.headings[team, active]) * cfg.dt
             self.speeds[team, active] = np.clip(
-                self.speeds[team, active] + self.SPEED_DELTAS[actions[team, active]], cfg.speed_min, cfg.speed_max
+                self.speeds[team, active] + actions[team, active, 0] * cfg.max_acceleration * cfg.dt,
+                cfg.speed_min, cfg.speed_max,
             )
             self.headings[team, active] = wrap_angle(
-                self.headings[team, active] + self.HEADING_DELTAS[actions[team, active]]
+                self.headings[team, active] + actions[team, active, 1] * math.radians(cfg.max_turn_rate_degrees) * cfg.dt
             )
+            self.positions[team, active, 0] += self.speeds[team, active] * np.cos(self.headings[team, active]) * cfg.dt
+            self.positions[team, active, 1] += self.speeds[team, active] * np.sin(self.headings[team, active]) * cfg.dt
             for agent in np.flatnonzero(active):
-                self._trails[team][int(agent)].append(self.positions[team, agent].copy())
+                self._trails[team][agent].append(self.positions[team, agent].copy())
 
-    def outside_map_mask(self) -> np.ndarray:
-        """Diagnostic only; never changes physical state, reward or terminal status."""
-        return np.any(np.abs(self.positions) > self.config.map_size / 2, axis=-1)
+    def _resolve_out_of_bounds(self):
+        outside = self.alive & np.any(np.abs(self.positions) > self.config.map_size / 2, axis=-1)
+        losses = outside.sum(axis=1).astype(np.int32)
+        self.alive[outside] = False
+        self.oob_losses += losses
+        return losses
 
-    def _alive_pairs(self):
+    def _resolve_collisions(self, previous_positions):
         first, second = np.triu_indices(2 * self.N_AGENTS, k=1)
         valid = self.alive.ravel()[first] & self.alive.ravel()[second]
-        return first[valid], second[valid]
-
-    def _resolve_collisions(self, previous_positions: np.ndarray) -> np.ndarray:
-        first, second = self._alive_pairs()
+        first, second = first[valid], second[valid]
         previous, current = previous_positions.reshape(-1, 2), self.positions.reshape(-1, 2)
         r0 = previous[first] - previous[second]
         displacement = current - previous
@@ -200,7 +199,7 @@ class UAVCombatEnv(gym.Env):
         self.collision_losses += losses
         return losses
 
-    def team_detected_enemy_mask(self, team: int) -> np.ndarray:
+    def team_detected_enemy_mask(self, team):
         detected = np.zeros(self.N_AGENTS, dtype=bool)
         friends, enemies = np.flatnonzero(self.alive[team]), np.flatnonzero(self.alive[1 - team])
         if friends.size and enemies.size:
@@ -215,7 +214,7 @@ class UAVCombatEnv(gym.Env):
                 float(wrap_angle(los - self.headings[attacker_team, attacker])),
                 float(wrap_angle(los - self.headings[target_team, target])))
 
-    def _attack_valid(self, attacker_team, attacker, target_team, target) -> bool:
+    def _attack_valid(self, attacker_team, attacker, target_team, target):
         if not (self.alive[attacker_team, attacker] and self.alive[target_team, target]):
             return False
         distance, alpha, beta = self._compute_pair_geometry(attacker_team, attacker, target_team, target)
@@ -223,12 +222,15 @@ class UAVCombatEnv(gym.Env):
                     and abs(alpha) <= math.radians(self.config.attack_ata_degrees) + 1e-12
                     and abs(beta) <= math.radians(self.config.attack_aspect_degrees) + 1e-12)
 
-    def _resolve_attacks(self) -> np.ndarray:
-        victims: list[set[int]] = [set(), set()]
+    def _resolve_attacks(self):
+        victims = [set(), set()]
         for team in range(2):
+            # Both diagnostics refer to the post-OOB/collision, pre-weapon snapshot.
+            self.radar_contact_steps[team] += int(self.team_detected_enemy_mask(team).any())
             for attacker in np.flatnonzero(self.alive[team]):
                 valid = [int(j) for j in np.flatnonzero(self.alive[1 - team])
                          if self._attack_valid(team, attacker, 1 - team, j)]
+                self.attack_window_count[team] += len(valid)
                 if valid:
                     chosen = min(valid, key=lambda j: (self._compute_pair_geometry(team, attacker, 1 - team, j)[0], j))
                     victims[1 - team].add(chosen)
@@ -238,80 +240,44 @@ class UAVCombatEnv(gym.Env):
                 self.alive[team, agent] = False
             kills[1 - team] = len(victims[team])
         self.combat_kills += kills
+        self.weapon_losses += kills[::-1]
         return kills
 
-    def _enemy_metrics(self) -> tuple[np.ndarray, np.ndarray]:
-        distances = np.full((2, self.N_AGENTS), np.inf)
-        angles = np.full_like(distances, np.inf)
-        for team in range(2):
-            targets = np.flatnonzero(self.team_detected_enemy_mask(team))
-            if not len(targets):
-                continue
-            for agent in np.flatnonzero(self.alive[team]):
-                geometry = [self._compute_pair_geometry(team, agent, 1 - team, j) for j in targets]
-                distances[team, agent] = min(row[0] for row in geometry)
-                angles[team, agent] = min(abs(row[1]) for row in geometry)
-        return distances, angles
+    def _pair_quality(self, team, attacker, target_team, target):
+        distance, alpha, beta = self._compute_pair_geometry(team, attacker, target_team, target)
+        cfg, reward = self.config, self.reward_config
+        q_d = np.clip((cfg.radar_range - distance) / (cfg.radar_range - cfg.attack_range), 0, 1)
+        return float(reward.potential_distance_weight * q_d
+                     + reward.potential_ata_weight * (1 + math.cos(alpha)) / 2
+                     + reward.potential_aspect_weight * (1 + math.cos(beta)) / 2)
 
-    def _reward_components(self, previous_positions, previous_metrics, kills, collisions, terminated):
-        cfg = self.reward_config
-        result = {key: np.zeros(2) for key in self.REWARD_COMPONENTS}
-        result["kill_reward"] = cfg.enemy_kill_reward * kills
-        result["own_loss_reward"] = -cfg.own_loss_penalty * (kills[::-1] + collisions)
-        if terminated and self.last_winner is not None:
-            winner, loser = self.last_winner, 1 - self.last_winner
-            if not self.alive[loser].any():
-                result["terminal_reward"][winner] = cfg.all_enemy_destroyed_reward
-                result["terminal_reward"][loser] = -cfg.all_own_destroyed_penalty
-            else:
-                result["timeout_reward"][winner] = cfg.timeout_advantage_reward
-                result["timeout_reward"][loser] = -cfg.timeout_disadvantage_penalty
-        old_distances, old_angles = previous_metrics
-        distances, angles = self._enemy_metrics()
-        flat_current = self.positions.reshape(-1, 2)
-        flat_previous = previous_positions.reshape(-1, 2)
-        for team in range(2):
-            survivors = np.flatnonzero(self.alive[team])
-            if not len(survivors):
-                continue
-            distance_rewards, angle_rewards, collision_rewards = [], [], []
-            for agent in survivors:
-                before_d, now_d = old_distances[team, agent], distances[team, agent]
-                before_a, now_a = old_angles[team, agent], angles[team, agent]
-                distance_rewards.append((before_d - now_d) / 1000 if np.isfinite(before_d + now_d) and before_d > 1500 else 0.0)
-                angle_rewards.append(before_a - now_a if np.isfinite(before_a + now_a) else 0.0)
-                own_id = team * self.N_AGENTS + agent
-                others = np.flatnonzero(self.alive.ravel()).tolist()
-                others.remove(own_id)
-                value = 0.0
-                if others:
-                    nearest = min(others, key=lambda j: (float(np.linalg.norm(flat_current[j] - flat_current[own_id])), j))
-                    d_curr = float(np.linalg.norm(flat_current[nearest] - flat_current[own_id]))
-                    if d_curr < self.config.collision_reward_distance:
-                        d_prev = float(np.linalg.norm(flat_previous[nearest] - flat_previous[own_id]))
-                        value = (d_curr - d_prev) / 1000
-                collision_rewards.append(value)
-            result["distance_reward"][team] = np.mean(distance_rewards)
-            result["attack_angle_reward"][team] = np.mean(angle_rewards)
-            result["collision_avoidance_reward"][team] = np.mean(collision_rewards)
-        return result
+    def _team_attack_quality(self, team):
+        attackers = np.flatnonzero(self.alive[team])
+        targets = np.flatnonzero(self.team_detected_enemy_mask(team))
+        if not len(attackers) or not len(targets):
+            return 0.0
+        return float(np.mean([max(self._pair_quality(team, i, 1 - team, j) for i in attackers) for j in targets]))
 
-    def _is_terminal(self) -> bool:
+    def _compute_potential(self):
+        return self._team_attack_quality(0) - self._team_attack_quality(1)
+
+    def _is_terminal(self):
         return bool(not self.alive[0].any() or not self.alive[1].any() or self.step_count >= self.config.episode_steps)
 
-    def _determine_winner(self) -> int | None:
+    def _determine_winner(self):
         red, blue = self.alive.sum(axis=1)
         return 0 if red > blue else (1 if blue > red else None)
 
-    def _get_actor_obs(self) -> np.ndarray:
+    def _get_actor_obs(self):
         cfg = self.config
         observations = np.zeros((2, self.N_AGENTS, self.OBS_DIM), dtype=np.float32)
+        speed_scale = cfg.speed_max - cfg.speed_min
         for team in range(2):
             detected = self.team_detected_enemy_mask(team)
             for agent in np.flatnonzero(self.alive[team]):
                 own = observations[team, agent]
-                own[:5] = (* (self.positions[team, agent] / (cfg.map_size / 2)),
-                           (self.speeds[team, agent] - cfg.speed_min) / (cfg.speed_max - cfg.speed_min),
+                own[:5] = (*self.positions[team, agent] / (cfg.map_size / 2),
+                           2 * (self.speeds[team, agent] - cfg.speed_min) / speed_scale - 1,
                            math.sin(self.headings[team, agent]), math.cos(self.headings[team, agent]))
                 entities = [(team, j) for j in range(self.N_AGENTS) if j != agent] + [(1 - team, j) for j in range(self.N_AGENTS)]
                 for slot, (other_team, other) in enumerate(entities):
@@ -322,51 +288,53 @@ class UAVCombatEnv(gym.Env):
                     own[start:start + 7] = (
                         distance / (math.sqrt(2) * cfg.map_size), math.sin(alpha), math.cos(alpha),
                         math.sin(beta), math.cos(beta),
-                        (self.speeds[other_team, other] - self.speeds[team, agent]) / (cfg.speed_max - cfg.speed_min), 1.0,
+                        np.clip((self.speeds[other_team, other] - self.speeds[team, agent]) / speed_scale, -1, 1), 1.,
                     )
         return observations
 
-    def global_state(self) -> np.ndarray:
+    def global_state(self):
         cfg = self.config
         state = np.zeros((2, self.N_AGENTS, 6), dtype=np.float32)
         state[..., :2] = self.positions / (cfg.map_size / 2)
-        state[..., 2] = (self.speeds - cfg.speed_min) / (cfg.speed_max - cfg.speed_min)
-        state[..., 3] = np.sin(self.headings)
-        state[..., 4] = np.cos(self.headings)
-        state[..., 5] = self.alive
+        state[..., 2] = 2 * (self.speeds - cfg.speed_min) / (cfg.speed_max - cfg.speed_min) - 1
+        state[..., 3], state[..., 4], state[..., 5] = np.sin(self.headings), np.cos(self.headings), self.alive
         state[~self.alive] = 0
         return state.ravel()
 
-    def _info(self, components, terminated: bool) -> dict[str, Any]:
+    def _counts(self):
+        red, blue = self.alive.sum(axis=1)
+        return dict(zip(self.EPISODE_METRICS, (
+            int(red), int(blue), *map(int, self.combat_kills), *map(int, self.weapon_losses),
+            *map(int, self.oob_losses), *map(int, self.collision_losses),
+            *map(int, self.attack_window_count), *map(int, self.radar_contact_steps),
+        )))
+
+    def _info(self, components, terminated):
         result = ("draw" if self.last_winner is None else ("win" if self.last_winner == 0 else "loss")) if terminated else None
         totals = sum(components.values())
-        outside = (self.outside_map_mask() & self.alive).sum(axis=1)
         info = {
             "step": self.step_count, "winner": self.last_winner, "result": result,
             "alive": self.alive.sum(axis=1).tolist(), "active_masks": self.alive.astype(np.float32).copy(),
-            "available_action_masks": self.available_action_masks(0),
             "global_state": self.global_state(), "combat_kills": self.combat_kills.tolist(),
-            "collision": self.collision_losses.tolist(), "outside_map": outside.tolist(),
+            "weapon_losses": self.weapon_losses.tolist(), "oob": self.oob_losses.tolist(),
+            "collision": self.collision_losses.tolist(), "attack_window_count": self.attack_window_count.tolist(),
+            "radar_contact_steps": self.radar_contact_steps.tolist(), **self._counts(),
             **{key: float(value[0]) for key, value in components.items()},
-            "total_reward": float(totals[0]), "team_rewards": totals.tolist(),
+            "team_reward_components": {key: value.tolist() for key, value in components.items()},
+            "total_reward": float(totals[0]), "team_rewards": totals.tolist(), "potential": self._potential,
         }
         if terminated:
             info["episode_summary"] = {
-                "return": self._episode_return, "total_return": self._episode_return, "result": result,
-                "red_alive": int(self.alive[0].sum()), "blue_alive": int(self.alive[1].sum()),
-                "red_combat_kill": int(self.combat_kills[0]), "blue_combat_kill": int(self.combat_kills[1]),
-                "red_collision": int(self.collision_losses[0]), "blue_collision": int(self.collision_losses[1]),
-                "red_outside_map": int(outside[0]), "blue_outside_map": int(outside[1]),
-                "red_ever_outside": int(self._ever_outside[0].sum()), "blue_ever_outside": int(self._ever_outside[1].sum()),
+                "return": self._episode_return, "result": result, **self._counts(),
                 **self._episode_rewards, "episode_length": self.step_count,
             }
         return info
 
-    def render(self) -> np.ndarray:
+    def render(self):
         if self._renderer is None:
             from .rendering import CombatRenderer
             self._renderer = CombatRenderer(self.config, self.render_config, self.project_root)
         return self._renderer.render(self)
 
-    def close(self) -> None:
+    def close(self):
         self._renderer = None

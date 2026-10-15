@@ -64,7 +64,6 @@ def evaluate_policy(
             red_actions = policy.policy_actions(
                 observations[0][None],
                 info["active_masks"][0][None],
-                info["available_action_masks"][None],
                 deterministic=True,
             )[0]
             blue_actions = opponent.act(env, 1)
@@ -98,10 +97,7 @@ def evaluate_policy(
         "blue_combat_kill": float(
             np.mean([row["blue_combat_kill"] for row in rows])
         ),
-        "red_outside_map": float(np.mean([row["red_outside_map"] for row in rows])),
-        "blue_outside_map": float(np.mean([row["blue_outside_map"] for row in rows])),
-        "red_collision": float(np.mean([row["red_collision"] for row in rows])),
-        "blue_collision": float(np.mean([row["blue_collision"] for row in rows])),
+        **{key: float(np.mean([row[key] for row in rows])) for key in UAVCombatEnv.EPISODE_METRICS},
         "mean_episode_length": float(
             np.mean([row["episode_length"] for row in rows])
         ),
@@ -112,7 +108,7 @@ def evaluate_policy(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate masked categorical MAPPO in the Xu 5v5 baseline"
+        description="Evaluate deterministic tanh-mean MAPPO in fixed 5v5 continuous V2"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--checkpoint", required=True)
@@ -121,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--gif", default=None)
     parser.add_argument("--blue-strategy", type=int, choices=(1, 2, 3), default=None)
+    parser.add_argument("--output", default=None, help="Optional metrics JSON file")
     return parser
 
 
@@ -144,7 +141,12 @@ def main() -> None:
         seed_start=args.seed_start,
         gif_path=args.gif,
     )
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    payload = json.dumps(metrics, indent=2, ensure_ascii=False)
+    if args.output:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
 
 
 if __name__ == "__main__":

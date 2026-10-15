@@ -14,27 +14,47 @@ class EnvironmentConfig:
     episode_steps: int = 300
     speed_min: float = 50.0
     speed_max: float = 150.0
-    initial_speed: float = 100.0
-    spawn_x: float = 3_500.0
-    spawn_y_spacing: float = 1_500.0
-    spawn_jitter: float = 200.0
-    attack_range: float = 600.0
-    radar_range: float = 2_000.0
-    attack_ata_degrees: float = 15.0
-    attack_aspect_degrees: float = 50.0
-    collision_distance: float = 150.0
-    collision_avoidance_distance: float = 450.0
-    collision_reward_distance: float = 600.0
+    initial_speed_min: float = 95.0
+    initial_speed_max: float = 105.0
+    max_acceleration: float = 10.0
+    max_turn_rate_degrees: float = 10.0
+    spawn_x_min: float = 3_200.0
+    spawn_x_max: float = 3_800.0
+    spawn_y_min: float = -3_000.0
+    spawn_y_max: float = 3_000.0
+    min_spawn_y_separation: float = 500.0
+    heading_jitter_degrees: float = 5.0
+    attack_range: float = 1_000.0
+    radar_range: float = 3_000.0
+    attack_ata_degrees: float = 30.0
+    attack_aspect_degrees: float = 45.0
+    collision_distance: float = 50.0
+    blue_boundary_margin: float = 1_000.0
+    blue_collision_avoidance_distance: float = 300.0
+    blue_assignment_interval: int = 5
+    blue_tail_distance: float = 700.0
+    blue_far_distance: float = 2_000.0
+    blue_speed_advantage: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.radar_range <= self.attack_range:
+            raise ValueError("radar_range must exceed attack_range for the V2 potential")
+        if self.spawn_y_max - self.spawn_y_min < 4 * self.min_spawn_y_separation:
+            raise ValueError("Spawn y range cannot fit five separated UAVs")
 
 
 @dataclass
 class RewardConfig:
-    all_enemy_destroyed_reward: float = 100.0
-    timeout_advantage_reward: float = 80.0
-    enemy_kill_reward: float = 20.0
-    all_own_destroyed_penalty: float = 100.0
-    timeout_disadvantage_penalty: float = 80.0
-    own_loss_penalty: float = 20.0
+    weapon_kill_reward: float = 5.0
+    weapon_loss_penalty: float = 5.0
+    oob_penalty: float = 5.0
+    collision_penalty: float = 5.0
+    terminal_reward: float = 20.0
+    shaping_scale: float = 0.5
+    shaping_gamma: float = 0.99
+    potential_distance_weight: float = 0.25
+    potential_ata_weight: float = 0.375
+    potential_aspect_weight: float = 0.375
 
 
 @dataclass
@@ -65,7 +85,7 @@ class MAPPOConfig:
 
 @dataclass
 class TrainingConfig:
-    blue_strategy: int = 1
+    blue_strategy: int = 2
     total_env_steps: int = 2_000_000
     parallel_envs: int = 16
     rollout_length: int = 128
@@ -73,7 +93,7 @@ class TrainingConfig:
     checkpoint_interval_steps: int = 100_000
     evaluation_interval_steps: int = 100_000
     evaluation_episodes: int = 100
-    output_dir: str = "runs/xu_course1_seed7"
+    output_dir: str = "runs/v2_5v5_seed7"
     device: str = "cuda"
 
     def __post_init__(self) -> None:

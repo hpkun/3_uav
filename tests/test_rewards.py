@@ -1,105 +1,114 @@
 import math
-
 import numpy as np
 import pytest
 
 
-def components(env, previous_positions, previous_metrics):
-    return env._reward_components(previous_positions,previous_metrics,np.zeros(2,dtype=int),np.zeros(2,dtype=int),False)
-
-
 @pytest.mark.parametrize('attacker',[0,1])
-def test_kill_loss_terminal_rewards(make_env,noop,attacker):
+def test_weapon_event_and_terminal_rewards(make_env,zero_actions,attacker):
     env = make_env((0,0),(1,0))
-    env.positions[attacker,0],env.positions[1-attacker,0] = (0,0),(400,0)
+    env.positions[attacker,0],env.positions[1-attacker,0] = (0,0),(500,0)
     env.headings.fill(0)
-    _,reward,done,_,info = env.step(noop(env))
+    env.speeds.fill(100)
+    _,reward,done,_,info = env.step(zero_actions)
     assert done
-    np.testing.assert_allclose(reward[attacker],120)
-    np.testing.assert_allclose(reward[1-attacker],-120)
-    assert info['kill_reward'] == (20 if attacker == 0 else 0)
-    assert info['own_loss_reward'] == (0 if attacker == 0 else -20)
-    assert info['terminal_reward'] == (100 if attacker == 0 else -100)
+    assert info['weapon_reward'] == (5 if attacker == 0 else -5)
+    assert info['terminal_reward'] == (20 if attacker == 0 else -20)
+    np.testing.assert_allclose(reward[attacker],25)
+    np.testing.assert_allclose(reward[1-attacker],-25)
 
 
-@pytest.mark.parametrize('red,blue,value',[(3,2,80),(2,3,-80),(3,3,0)])
-def test_timeout_reward(make_env,noop,red,blue,value):
+@pytest.mark.parametrize('cause',['oob','collision'])
+@pytest.mark.parametrize('team',[0,1])
+def test_self_penalty_no_positive_opponent_event(make_env,zero_actions,cause,team):
+    env = make_env((0,0),(1,0),(team,1),(team,2))
+    env.positions[0,0],env.positions[1,0] = (-3000,-3000),(3000,3000)
+    env.headings.fill(0)
+    env.speeds.fill(100)
+    if cause == 'oob':
+        env.positions[team,1],env.positions[team,2] = (4990,0),(0,3000)
+        expected = -5
+    else:
+        env.positions[team,1],env.positions[team,2] = (0,0),(40,0)
+        expected = -10
+    _,reward,done,_,info = env.step(zero_actions)
+    assert not done and info['weapon_reward'] == 0
+    np.testing.assert_allclose(reward[team],expected)
+    np.testing.assert_allclose(reward[1-team],0)
+
+
+def test_cross_team_collision_draw_rewards(make_env,zero_actions):
+    env = make_env((0,0),(1,0))
+    env.positions[0,0],env.positions[1,0] = (0,0),(50,0)
+    env.headings.fill(0)
+    env.speeds.fill(100)
+    _,reward,done,_,info = env.step(zero_actions)
+    assert done and info['result'] == 'draw'
+    assert info['weapon_reward'] == info['terminal_reward'] == 0
+    np.testing.assert_allclose(reward,-5)
+
+
+@pytest.mark.parametrize('red,blue,value',[(3,2,20),(2,3,-20),(3,3,0)])
+def test_timeout_terminal_reward(make_env,zero_actions,red,blue,value):
     env = make_env(episode_steps=1)
     env.alive[0,red:] = False
     env.alive[1,blue:] = False
-    _,_,done,truncated,info = env.step(noop(env))
-    assert done and not truncated
-    assert info['timeout_reward'] == value
-    assert info['terminal_reward'] == 0
+    _,_,done,truncated,info = env.step(zero_actions)
+    assert done and not truncated and info['terminal_reward'] == value
 
 
-def test_mutual_total_destruction_is_draw_and_collision_own_loss(make_env,noop):
+def test_radar_constrained_potential_quality_and_improvement(make_env):
     env = make_env((0,0),(1,0))
-    env.positions[0,0],env.positions[1,0] = (0,0),(150,0)
+    env.positions[0,0],env.positions[1,0] = (0,0),(3000.001,0)
     env.headings.fill(0)
-    _,reward,done,_,info = env.step(noop(env))
-    assert done and info['result'] == 'draw'
-    assert info['terminal_reward'] == info['timeout_reward'] == 0
-    assert info['kill_reward'] == 0 and info['own_loss_reward'] == -20
-    np.testing.assert_allclose(reward,-20)
+    assert env._pair_quality(0,0,1,0) > 0
+    assert env._team_attack_quality(0) == env._team_attack_quality(1) == 0
+    env.positions[1,0] = (3000,0)
+    assert env._team_attack_quality(0) > 0
+    env.positions[1,0] = (2000,0)
+    env.headings[0,0] = math.radians(60)
+    earlier = env._compute_potential()
+    env.positions[1,0] = (1000,0)
+    env.headings[0,0] = 0
+    assert env._compute_potential() > earlier
+    tail = env._pair_quality(0,0,1,0)
+    assert tail == pytest.approx(1)
+    env.headings[1,0] = math.pi
+    assert env._pair_quality(0,0,1,0) < tail
 
 
-@pytest.mark.parametrize('before,after,expected',[
-    (1900,1800,.1),(1800,1900,-.1),(1500,1400,0),(1400,1300,0),
-    (2100,1900,0),(1900,2100,0),
-])
-def test_distance_aux_threshold_and_contact_continuity(make_env,before,after,expected):
-    env = make_env((0,0),(1,0))
-    env.positions[0,0],env.positions[1,0] = (0,0),(before,0)
-    old,metrics = env.positions.copy(),env._enemy_metrics()
-    env.positions[1,0,0] = after
-    r = components(env,old,metrics)
-    assert r['distance_reward'][0] == pytest.approx(expected)
+def test_terminal_zero_potential_and_zero_sum_shaping(make_env,zero_actions):
+    env = make_env((0,0),(1,0),shaping_scale=.5,episode_steps=1)
+    env.positions[0,0],env.positions[1,0] = (0,0),(2000,0)
+    env.headings.fill(0)
+    env.speeds.fill(100)
+    env._potential = env._compute_potential()
+    before = env._potential
+    _,_,done,_,info = env.step(zero_actions)
+    assert done and info['potential'] == 0
+    assert info['shaping_reward'] == pytest.approx(-.5*before)
+    red,blue = info['team_reward_components']['shaping_reward']
+    assert red == -blue
 
 
-@pytest.mark.parametrize('old_angle,new_angle,expected',[(30,10,20),(10,30,-20)])
-def test_attack_angle_aux_radians(make_env,old_angle,new_angle,expected):
-    env = make_env((0,0),(1,0))
-    env.positions[0,0],env.positions[1,0] = (0,0),(1000,0)
-    env.headings[0,0] = math.radians(old_angle)
-    old,metrics = env.positions.copy(),env._enemy_metrics()
-    env.headings[0,0] = math.radians(new_angle)
-    assert components(env,old,metrics)['attack_angle_reward'][0] == pytest.approx(math.radians(expected))
-
-
-@pytest.mark.parametrize('before,after,expected',[(500,400,-.1),(400,500,.1),(500,600,0),(600,700,0)])
-def test_collision_aux_distance_and_sign(make_env,before,after,expected):
-    env = make_env((0,0),(1,0))
-    env.positions[0,0],env.positions[1,0] = (0,0),(before,0)
-    old,metrics = env.positions.copy(),env._enemy_metrics()
-    env.positions[1,0,0] = after
-    assert components(env,old,metrics)['collision_avoidance_reward'][0] == pytest.approx(expected)
-
-
-def test_collision_aux_only_current_nearest_same_aircraft_difference(make_env):
-    env = make_env((0,0),(1,0),(1,1))
-    env.positions[0,0],env.positions[1,0],env.positions[1,1] = (0,0),(500,0),(200,0)
-    old,metrics = env.positions.copy(),env._enemy_metrics()
-    env.positions[1,0],env.positions[1,1] = (300,0),(400,0)
-    assert components(env,old,metrics)['collision_avoidance_reward'][0] == pytest.approx(-.2)
-
-
-def test_full_episode_component_and_death_accounting(make_env):
-    env = make_env()
+def test_episode_components_death_accounting_and_counter_reset(make_env):
+    env = make_env(shaping_scale=.5)
     rng = np.random.default_rng(17)
-    accumulated = {key:0.0 for key in env.REWARD_COMPONENTS}
+    accumulated = {k:0. for k in env.REWARD_COMPONENTS}
     done = False
     while not done:
-        masks = np.stack([env.available_action_masks(t) for t in range(2)])
-        actions = np.array([[rng.choice(np.flatnonzero(masks[t,i])) for i in range(5)] for t in range(2)])
-        _,reward,done,_,info = env.step(actions)
+        _,reward,done,_,info = env.step(rng.uniform(-1,1,(2,5,2)))
         for key in accumulated:
             accumulated[key] += info[key]
         assert sum(info[k] for k in accumulated) == pytest.approx(info['total_reward'])
-        np.testing.assert_allclose(reward[0],info['total_reward'],atol=1e-5)
-        for t in range(2):
-            assert env.alive[t].sum()+env.collision_losses[t]+env.combat_kills[1-t] == 5
+        np.testing.assert_allclose(reward[0],info['total_reward'],atol=1e-6)
+        for team in range(2):
+            assert env.alive[team].sum()+env.weapon_losses[team]+env.oob_losses[team]+env.collision_losses[team] == 5
+            assert env.weapon_losses[team] == env.combat_kills[1-team]
+            assert env.radar_contact_steps[team] <= env.step_count
     summary = info['episode_summary']
+    assert summary['return'] == pytest.approx(sum(accumulated.values()))
     for key in accumulated:
         assert summary[key] == pytest.approx(accumulated[key])
-    assert summary['total_return'] == pytest.approx(sum(accumulated.values()))
+    env.reset(seed=17)
+    for values in (env.weapon_losses,env.oob_losses,env.combat_kills,env.collision_losses,env.attack_window_count,env.radar_contact_steps):
+        assert not values.any()

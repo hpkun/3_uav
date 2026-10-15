@@ -9,7 +9,7 @@ from torch import nn
 
 from .config import MAPPOConfig
 from .env import UAVCombatEnv
-from .models import CentralizedCritic, CategoricalActor
+from .models import CentralizedCritic, ContinuousGaussianActor
 
 
 class RolloutBuffer:
@@ -22,7 +22,6 @@ class RolloutBuffer:
         num_agents: int,
         observation_dim: int,
         state_dim: int,
-        num_actions: int,
     ) -> None:
         self.horizon = int(horizon)
         self.num_envs = int(num_envs)
@@ -32,8 +31,7 @@ class RolloutBuffer:
             shape + (num_agents, observation_dim), dtype=np.float32
         )
         self.states = np.zeros(shape + (state_dim,), dtype=np.float32)
-        self.actions = np.zeros(shape + (num_agents,), dtype=np.int64)
-        self.action_masks = np.zeros(shape + (num_agents, num_actions), dtype=bool)
+        self.actions = np.zeros(shape + (num_agents, UAVCombatEnv.ACTION_DIM), dtype=np.float32)
         self.old_log_probabilities = np.zeros(
             shape + (num_agents,), dtype=np.float32
         )
@@ -55,7 +53,6 @@ class RolloutBuffer:
         rewards: np.ndarray,
         dones: np.ndarray,
         active_masks: np.ndarray,
-        action_masks: np.ndarray,
     ) -> None:
         if self.position >= self.horizon:
             raise RuntimeError("rollout buffer is full")
@@ -68,7 +65,6 @@ class RolloutBuffer:
         self.rewards[index] = rewards
         self.dones[index] = dones
         self.active_masks[index] = active_masks
-        self.action_masks[index] = action_masks
         self.position += 1
 
     def compute_returns_and_advantages(
@@ -108,7 +104,7 @@ class MAPPO:
         self.device = torch.device(device)
         self.n_agents = n_agents
         self.rng = np.random.default_rng(seed)
-        self.actor = CategoricalActor(observation_dim, config.hidden_size, UAVCombatEnv.N_ACTIONS).to(self.device)
+        self.actor = ContinuousGaussianActor(observation_dim, config.hidden_size).to(self.device)
         self.critic = CentralizedCritic(state_dim, config.hidden_size).to(self.device)
         self.actor_optimizer = torch.optim.Adam(
             self.actor.parameters(), lr=config.actor_learning_rate, eps=1e-5
@@ -123,7 +119,6 @@ class MAPPO:
         observations: np.ndarray,
         states: np.ndarray,
         active_masks: np.ndarray,
-        action_masks: np.ndarray,
         *,
         deterministic: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -134,11 +129,10 @@ class MAPPO:
         masks_t = torch.as_tensor(
             active_masks, device=self.device, dtype=torch.float32
         )
-        action_masks_t = torch.as_tensor(action_masks, device=self.device, dtype=torch.bool)
         actions, log_probabilities = self.actor.sample(
-            observations_t, action_masks_t, deterministic=deterministic
+            observations_t, deterministic=deterministic
         )
-        actions = torch.where(masks_t > 0.5, actions, UAVCombatEnv.NO_OP)
+        actions = actions * masks_t[..., None]
         log_probabilities = log_probabilities * masks_t
         values = self.critic(states_t)
         return (
@@ -152,7 +146,6 @@ class MAPPO:
         self,
         observations: np.ndarray,
         active_masks: np.ndarray,
-        action_masks: np.ndarray,
         *,
         deterministic: bool = True,
     ) -> np.ndarray:
@@ -162,9 +155,8 @@ class MAPPO:
         masks_t = torch.as_tensor(
             active_masks, device=self.device, dtype=torch.float32
         )
-        action_masks_t = torch.as_tensor(action_masks, device=self.device, dtype=torch.bool)
-        actions, _ = self.actor.sample(observations_t, action_masks_t, deterministic=deterministic)
-        return torch.where(masks_t > 0.5, actions, UAVCombatEnv.NO_OP).cpu().numpy()
+        actions, _ = self.actor.sample(observations_t, deterministic=deterministic)
+        return (actions * masks_t[..., None]).cpu().numpy()
 
     @torch.no_grad()
     def values(self, states: np.ndarray) -> np.ndarray:
@@ -178,8 +170,7 @@ class MAPPO:
         )
         observations = to_tensor(buffer.observations)
         states = to_tensor(buffer.states)
-        actions = torch.as_tensor(buffer.actions, device=self.device, dtype=torch.long)
-        action_masks = torch.as_tensor(buffer.action_masks, device=self.device, dtype=torch.bool)
+        actions = to_tensor(buffer.actions)
         old_log_probabilities = to_tensor(buffer.old_log_probabilities)
         old_values = to_tensor(buffer.values)
         returns = to_tensor(buffer.returns)
@@ -197,8 +188,7 @@ class MAPPO:
             transition_count, self.n_agents, observations.shape[-1]
         )
         states = states.reshape(transition_count, states.shape[-1])
-        actions = actions.reshape(transition_count, self.n_agents)
-        action_masks = action_masks.reshape(transition_count, self.n_agents, UAVCombatEnv.N_ACTIONS)
+        actions = actions.reshape(transition_count, self.n_agents, UAVCombatEnv.ACTION_DIM)
         old_log_probabilities = old_log_probabilities.reshape(
             transition_count, self.n_agents
         )
@@ -225,7 +215,7 @@ class MAPPO:
                 advantage_batch = actor_advantages[indices]
 
                 new_log_probability, entropy = self.actor.evaluate_actions(
-                    obs_batch, action_batch, action_masks[indices]
+                    obs_batch, action_batch
                 )
                 log_ratio = new_log_probability - old_log_batch
                 ratio = log_ratio.exp()

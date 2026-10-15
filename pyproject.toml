@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uav-mappo-2d"
 version = "0.1.0"
-description = "Xu-thesis-aligned 5v5 UAV combat with masked categorical MAPPO and three-stage curriculum"
+description = "Fixed 5v5 Continuous 2D UAV Combat Baseline V2 with vanilla MAPPO"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

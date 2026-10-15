@@ -21,25 +21,9 @@ CSV_FIELDS = [
     "global_step",
     "episode",
     "return",
-    "total_return",
     "result",
-    "red_alive",
-    "blue_alive",
-    "red_combat_kill",
-    "blue_combat_kill",
-    "red_outside_map",
-    "blue_outside_map",
-    "red_ever_outside",
-    "blue_ever_outside",
-    "red_collision",
-    "blue_collision",
-    "kill_reward",
-    "own_loss_reward",
-    "terminal_reward",
-    "timeout_reward",
-    "distance_reward",
-    "attack_angle_reward",
-    "collision_avoidance_reward",
+    *UAVCombatEnv.EPISODE_METRICS,
+    *UAVCombatEnv.REWARD_COMPONENTS,
     "episode_length",
 ]
 
@@ -73,17 +57,20 @@ def _training_log(
         f"alive(R/B)={_mean(rows, 'red_alive'):.2f}/{_mean(rows, 'blue_alive'):.2f} "
         f"combat_kill(R/B)={_mean(rows, 'red_combat_kill'):.2f}/"
         f"{_mean(rows, 'blue_combat_kill'):.2f} "
-        f"outside(R/B)={_mean(rows, 'red_outside_map'):.2f}/{_mean(rows, 'blue_outside_map'):.2f} "
+        f"weapon_loss(R/B)={_mean(rows, 'red_weapon_loss'):.2f}/{_mean(rows, 'blue_weapon_loss'):.2f} "
+        f"oob(R/B)={_mean(rows, 'red_oob'):.2f}/{_mean(rows, 'blue_oob'):.2f} "
         f"collision(R/B)={_mean(rows, 'red_collision'):.2f}/{_mean(rows, 'blue_collision'):.2f} "
-        f"reward(kill/loss/terminal/timeout/dist/angle/avoid)="
-        f"{_mean(rows, 'kill_reward'):.2f}/{_mean(rows, 'own_loss_reward'):.2f}/"
-        f"{_mean(rows, 'terminal_reward'):.2f}/{_mean(rows, 'timeout_reward'):.2f}/"
-        f"{_mean(rows, 'distance_reward'):.3f}/{_mean(rows, 'attack_angle_reward'):.3f}/"
-        f"{_mean(rows, 'collision_avoidance_reward'):.3f} "
+        f"window(R/B)={_mean(rows, 'red_attack_window'):.2f}/{_mean(rows, 'blue_attack_window'):.2f} "
+        f"contact(R/B)={_mean(rows, 'red_radar_contact_steps'):.1f}/{_mean(rows, 'blue_radar_contact_steps'):.1f} "
+        f"reward(weapon/oob/collision/terminal/shape)="
+        f"{_mean(rows, 'weapon_reward'):.2f}/{_mean(rows, 'oob_reward'):.2f}/"
+        f"{_mean(rows, 'collision_reward'):.2f}/{_mean(rows, 'terminal_reward'):.2f}/"
+        f"{_mean(rows, 'shaping_reward'):.3f} "
         f"length={_mean(rows, 'episode_length'):.1f} "
         f"actor={metrics['actor_loss']:.4f} critic={metrics['critic_loss']:.4f} "
         f"entropy={metrics['entropy']:.4f} kl={metrics['approx_kl']:.5f} "
         f"clip={metrics['clip_fraction']:.3f} "
+        f"grad(A/C)={metrics['actor_grad_norm']:.3f}/{metrics['critic_grad_norm']:.3f} "
         f"expl_var={metrics['explained_variance']:.3f}"
     )
 
@@ -175,6 +162,17 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
     if not csv_exists:
         csv_writer.writeheader()
 
+    update_csv = output_dir / "updates.csv"
+    update_exists = update_csv.exists() and update_csv.stat().st_size > 0
+    update_stream = update_csv.open("a", newline="", encoding="utf-8")
+    summary_keys = [key for key in CSV_FIELDS[2:] if key != "result"]
+    update_writer = csv.DictWriter(update_stream, fieldnames=[
+        "global_step", "episodes", "win_rate", "draw_rate", "loss_rate",
+        *[f"mean_{key}" for key in summary_keys], *last_metrics,
+    ])
+    if not update_exists:
+        update_writer.writeheader()
+
     environments = ParallelUAVEnvs(
         training.parallel_envs,
         config.environment,
@@ -184,7 +182,7 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
         base_seed=config.seed + global_step,
         blue_strategy=training.blue_strategy,
     )
-    observations, states, active_masks, action_masks, _ = environments.reset()
+    observations, states, active_masks, _ = environments.reset()
     print(
         f"[START] total_env_steps={training.total_env_steps} "
         f"rollout={training.rollout_length} parallel={training.parallel_envs} "
@@ -200,11 +198,10 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
             buffer = RolloutBuffer(
                 horizon, training.parallel_envs, UAVCombatEnv.N_AGENTS,
                 UAVCombatEnv.OBS_DIM, UAVCombatEnv.STATE_DIM,
-                UAVCombatEnv.N_ACTIONS,
             )
             for _ in range(horizon):
                 actions, log_probabilities, values = learner.act(
-                    observations, states, active_masks, action_masks
+                    observations, states, active_masks
                 )
                 result = environments.step(actions)
                 buffer.insert(
@@ -216,7 +213,6 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
                     result.rewards,
                     result.dones,
                     active_masks,
-                    action_masks,
                 )
                 global_step += training.parallel_envs
                 for info in result.infos:
@@ -250,7 +246,6 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
                 observations = result.observations
                 states = result.states
                 active_masks = result.active_masks
-                action_masks = result.action_masks
 
             last_values = learner.values(states)
             buffer.compute_returns_and_advantages(
@@ -259,6 +254,14 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
             last_metrics = learner.update(buffer)
             for key, value in last_metrics.items():
                 tensorboard.add_scalar(f"update/{key}", value, global_step)
+            update_writer.writerow({
+                "global_step": global_step, "episodes": episode_index,
+                **{f"{label}_rate": sum(row["result"] == label for row in recent_episodes)
+                   / max(len(recent_episodes), 1) for label in ("win", "draw", "loss")},
+                **{f"mean_{key}": _mean(recent_episodes, key) for key in summary_keys},
+                **last_metrics,
+            })
+            update_stream.flush()
 
             if global_step >= next_log:
                 print(
@@ -323,13 +326,14 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
         return final_path
     finally:
         csv_stream.close()
+        update_stream.close()
         tensorboard.close()
         environments.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train categorical MAPPO in the Xu-thesis-aligned 5v5 baseline"
+        description="Train continuous MAPPO in Fixed 5v5 2D UAV Combat Baseline V2"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     initialization = parser.add_mutually_exclusive_group()

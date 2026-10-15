@@ -1,3 +1,7 @@
+# HISTORICAL / DEPRECATED — 不适用于 V2
+
+下文仅为旧Xu离散基线历史实验记录，不代表当前V2，也不是V2训练证据。当前规范见environment_spec.md，当前验收见validation_v2_5v5.md。
+
 # Xu-5v5基准重构验收报告
 
 代码按本轮明确要求完成，完整测试、smoke、三组各100局规则sanity和50k Course1均已实际执行。数值与接口验收通过，但行为验收有明确缺口：规则sanity和50k短训练均未产生武器击杀，Strategy3仍以碰撞损失为主。不能将本报告解读为“已恢复论文作战效果”或“已验证可学习攻击”。

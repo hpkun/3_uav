@@ -20,7 +20,6 @@ class VectorStep:
     observations: np.ndarray
     states: np.ndarray
     active_masks: np.ndarray
-    action_masks: np.ndarray
     rewards: np.ndarray
     dones: np.ndarray
     infos: list[dict[str, Any]]
@@ -59,7 +58,6 @@ def _worker(
                             observations[0],
                             info["global_state"],
                             info["active_masks"][0],
-                            info["available_action_masks"],
                             info,
                         ),
                     )
@@ -80,11 +78,9 @@ def _worker(
                     )
                     current_state = reset_info["global_state"]
                     current_mask = reset_info["active_masks"][0]
-                    current_action_mask = reset_info["available_action_masks"]
                 else:
                     current_state = info["global_state"]
                     current_mask = info["active_masks"][0]
-                    current_action_mask = info["available_action_masks"]
                 connection.send(
                     (
                         "result",
@@ -92,7 +88,6 @@ def _worker(
                             observations[0],
                             current_state,
                             current_mask,
-                            current_action_mask,
                             float(rewards[0, 0]),
                             done,
                             transition_info,
@@ -127,7 +122,7 @@ class ParallelUAVEnvs:
         project_root: str | Path,
         *,
         base_seed: int = 0,
-        blue_strategy: int = 1,
+        blue_strategy: int = 2,
     ) -> None:
         if num_envs < 1:
             raise ValueError("num_envs must be positive")
@@ -177,7 +172,7 @@ class ParallelUAVEnvs:
 
     def reset(
         self, seeds: list[int] | None = None
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         if seeds is None:
             seeds = [self.base_seed + index for index in range(self.num_envs)]
         if len(seeds) != self.num_envs:
@@ -189,17 +184,12 @@ class ParallelUAVEnvs:
             np.stack([result[0] for result in results]),
             np.stack([result[1] for result in results]),
             np.stack([result[2] for result in results]),
-            np.stack([result[3] for result in results]),
-            [result[4] for result in results],
+            [result[3] for result in results],
         )
 
     def step(self, red_actions: np.ndarray) -> VectorStep:
-        red_actions = np.asarray(red_actions)
-        expected = (self.num_envs, UAVCombatEnv.N_AGENTS)
-        if red_actions.shape != expected:
-            raise ValueError(f"Expected red actions {expected}, got {red_actions.shape}")
-        if not np.issubdtype(red_actions.dtype, np.integer) or np.any((red_actions < 0) | (red_actions >= UAVCombatEnv.N_ACTIONS)):
-            raise ValueError("Red actions must be integers in [0,9]")
+        expected = (self.num_envs, UAVCombatEnv.N_AGENTS, UAVCombatEnv.ACTION_DIM)
+        red_actions = UAVCombatEnv.validate_actions(red_actions, expected)
         for index, connection in enumerate(self._connections):
             connection.send(("step", red_actions[index]))
         results = [self._receive(index) for index in range(self.num_envs)]
@@ -207,10 +197,9 @@ class ParallelUAVEnvs:
             observations=np.stack([result[0] for result in results]),
             states=np.stack([result[1] for result in results]),
             active_masks=np.stack([result[2] for result in results]),
-            action_masks=np.stack([result[3] for result in results]),
-            rewards=np.asarray([result[4] for result in results], dtype=np.float32),
-            dones=np.asarray([result[5] for result in results], dtype=np.float32),
-            infos=[result[6] for result in results],
+            rewards=np.asarray([result[3] for result in results], dtype=np.float32),
+            dones=np.asarray([result[4] for result in results], dtype=np.float32),
+            infos=[result[5] for result in results],
         )
 
     def close(self) -> None:

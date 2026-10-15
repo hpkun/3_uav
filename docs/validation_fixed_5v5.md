@@ -1,3 +1,7 @@
+# HISTORICAL / DEPRECATED — 不适用于 V2
+
+下文仅为旧continuous 5v5历史记录，不代表当前V2，也不是V2训练证据；文内“当前Xu”也属于历史表述。当前规范见environment_spec.md，当前验收见validation_v2_5v5.md。
+
 # 固定 5v5 升级验收
 
 > 历史记录：本文件仅对应此前 continuous 5v5 环境，参数、测试和结果均不适用于当前 Xu 离散基线。旧 continuous 500k 结果同样不作为新基线的有效训练证据。当前定义见 environment_spec.md，当前验收见 validation_xu_5v5.md。

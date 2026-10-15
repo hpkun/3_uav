@@ -1,9 +1,0 @@
-# Initialize with Course2 weights through --init-checkpoint, not --resume.
-seed: 7
-training:
-  blue_strategy: 3
-  total_env_steps: 6000000
-  output_dir: runs/xu_course3_seed7
-  parallel_envs: 16
-  rollout_length: 128
-  device: cuda
