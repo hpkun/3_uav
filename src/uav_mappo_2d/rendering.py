@@ -140,7 +140,9 @@ class CombatRenderer:
         y = self.config.height - self.config.margin - (
             (float(point[1]) + half) / self.environment.map_size * usable_h
         )
-        return int(round(x)), int(round(y))
+        # Rendering clips only the drawing coordinates; physics remains unbounded.
+        return (int(round(np.clip(x, self.config.margin, self.config.width - self.config.margin))),
+                int(round(np.clip(y, self.config.margin, self.config.height - self.config.margin))))
 
     def render(self, env: "UAVCombatEnv") -> np.ndarray:
         cfg = self.config

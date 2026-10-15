@@ -1,5 +1,7 @@
 # 固定 5v5 升级验收
 
+> 历史记录：本文件仅对应此前 continuous 5v5 环境，参数、测试和结果均不适用于当前 Xu 离散基线。旧 continuous 500k 结果同样不作为新基线的有效训练证据。当前定义见 environment_spec.md，当前验收见 validation_xu_5v5.md。
+
 本轮完成固定5v5、确定性雷达及队内共享、partial Actor observation、自动武器、swept collision、reward分解和雷达约束规则蓝方。正式2M训练未运行。完整定义见 [environment_spec.md](environment_spec.md)。历史3v3训练结果保留，新模型输入维度不兼容旧checkpoint。
 
 ## 文件

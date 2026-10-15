@@ -1,92 +1,95 @@
-from __future__ import annotations
+import math
 
 import numpy as np
+import pytest
 
-from uav_mappo_2d.env import UAVCombatEnv
 from uav_mappo_2d.opponents import RuleBasedOpponent
 
 
-def test_no_contact_advance_and_contact_assignment() -> None:
-    env = UAVCombatEnv()
-    env.reset(seed=7)
-    rule = RuleBasedOpponent()
-    actions = rule.act(env, 1)
+def test_strategy1_straight_speed_avoidance_and_recovery(make_env):
+    env = make_env((0,0),(1,0))
+    rule = RuleBasedOpponent(1)
+    assert rule.act(env)[0] == 2
+    env.positions[1,0],env.positions[0,0] = (0,0),(-400,0)
+    assert rule.act(env)[0] == 5
+    env.positions[0,0] = (-4000,-4000)
+    env.headings[1,0] = math.pi - math.radians(10)
+    assert rule.act(env)[0] == 9
+    env.headings[1,0] = math.pi
+    env.speeds[1,0] = 99
+    assert rule.act(env)[0] == 4
+
+
+def test_strategy2_nearest_contact_direct_pursuit_and_no_contact(make_env):
+    env = make_env((0,0),(0,1),(1,0))
+    env.positions[1,0] = (0,0)
+    env.headings[1,0] = 0
+    env.positions[0,0],env.positions[0,1] = (1000,100),(1500,-1000)
+    rule = RuleBasedOpponent(2)
+    action = rule.act(env)[0]
+    assert rule.targets[0] == 0 and action == 9
+    # Target's heading is irrelevant to direct pursuit (no tail point).
+    env.headings[0,0] = math.pi
+    assert rule.act(env)[0] == action
+    env.positions[0] = (4500,-4500)
+    assert rule.act(env)[0] == 5  # wrap(pi)=-pi: deterministic right turn toward initial heading.
     assert np.all(rule.targets == -1)
-    assert np.all(actions[:, 1] == 0.0)
-    assert np.all(actions[:, 0] > 0.0)
-    env.positions[0, :, 0] = -500.0
-    env.positions[1, :, 0] = 500.0
-    rule.act(env, 1)
-    assert sorted(rule.targets.tolist()) == list(range(5))
-    assert rule.targets.tolist() == list(range(5))
-    previous = rule.targets.copy()
+
+
+def test_strategy3_capacity_and_farther_reassignment(make_env):
+    env = make_env()
+    env.positions[1,:,0] = np.arange(5)*10
+    env.positions[1,:,1] = 0
+    env.positions[0] = (4500,4500)
+    env.positions[0,0],env.positions[0,1] = (1000,0),(1500,0)
+    rule = RuleBasedOpponent(3)
+    rule.act(env)
+    assert rule.targets.tolist() == [-1,1,1,0,0]
+    assert all(t in (-1,0,1) for t in rule.targets)
+    env.alive[0,2] = False
+    rule.act(env)
+    assert rule.targets.tolist() == [1,1,0,0,0]
+    old = rule.targets.copy()
     rule.reset()
-    rule.act(env, 1)
-    np.testing.assert_array_equal(rule.targets, previous)
+    rule.act(env)
+    np.testing.assert_array_equal(old,rule.targets)
 
 
-def test_lost_or_dead_contacts_reassign_immediately() -> None:
-    env = UAVCombatEnv()
-    env.reset(seed=7)
-    env.positions[1, :, 0] = 3000.0
-    env.positions[0, :, 0] = -4000.0
-    env.positions[0, 0] = (1000.0, 0.0)
-    rule = RuleBasedOpponent()
-    rule.act(env, 1)
-    assert np.all(rule.targets == 0)
-    env.positions[0, 0] = (-4000.0, 0.0)
-    rule.act(env, 1)
-    assert np.all(rule.targets == -1)
-    env.positions[0, 2] = (1000.0, 0.0)
-    rule.act(env, 1)
-    assert np.all(rule.targets == 2)
-    env.alive[0, 2] = False
-    rule.act(env, 1)
+def test_strategy3_no_contact_farthest_teammate(make_env):
+    env = make_env((1,0),(1,1),(1,2),(0,0))
+    env.positions[0,0] = (4500,-4500)
+    env.positions[1,0],env.positions[1,1],env.positions[1,2] = (0,0),(1000,0),(-3000,1000)
+    env.headings[1,0] = 0
+    rule = RuleBasedOpponent(3)
+    assert rule.act(env)[0] == 9
     assert np.all(rule.targets == -1)
 
 
-def test_more_friends_cover_each_detected_enemy() -> None:
-    env = UAVCombatEnv()
-    env.reset(seed=3)
-    env.positions[1, :, 0] = 2500.0
-    env.positions[0, :, 0] = -4500.0
-    env.positions[0, 1] = (1000.0, -1500.0)
-    env.positions[0, 3] = (1000.0, 1500.0)
-    rule = RuleBasedOpponent()
-    rule.act(env, 1)
-    assert set(rule.targets) == {1, 3}
-    assert rule.targets[1] == 1
-    assert rule.targets[3] == 3
+@pytest.mark.parametrize('strategy',[1,2,3])
+def test_all_strategies_obey_avoidance_and_dead_masks(make_env,strategy):
+    env = make_env((1,0),(0,0))
+    env.positions[1,0],env.positions[0,0] = (0,0),(400,50)
+    env.headings[1,0] = 0
+    actions = RuleBasedOpponent(strategy).act(env)
+    assert actions[0] == 5
+    assert np.all(actions[1:] == 2)
+    masks = env.available_action_masks(1)
+    assert np.all(masks[np.arange(5),actions])
+    env.positions[0,0,1] = -50
+    assert RuleBasedOpponent(strategy).act(env)[0] == 9
 
 
-def test_periodic_reassignment_and_more_contacts_than_friends() -> None:
-    env = UAVCombatEnv()
-    env.reset(seed=7)
-    env.positions[0, :, 0] = -500.0
-    env.positions[1, :, 0] = 500.0
-    rule = RuleBasedOpponent()
-    rule.act(env, 1)
-    assert rule.targets.tolist() == list(range(5))
-    env.positions[0, [0, 4]] = env.positions[0, [4, 0]]
-    env.step_count = 4
-    rule.act(env, 1)
-    assert rule.targets.tolist() == list(range(5))
-    env.step_count = 5
-    rule.act(env, 1)
-    assert rule.targets.tolist() == [4, 1, 2, 3, 0]
-    env.alive[1, 1:4] = False
-    rule._assign_targets(env, 1)
-    assert rule.targets.tolist() == [4, -1, -1, -1, 0]
-
-
-def test_boundary_protection_without_contact() -> None:
-    env = UAVCombatEnv()
-    env.reset(seed=7)
-    env.alive[0] = False
-
-    env.positions[1, 0] = (4_600.0, 100.0)
-    env.headings[1, 0] = 0.0
-    rule = RuleBasedOpponent()
-    actions = rule.act(env, 1)
-    assert np.all(rule.targets == -1)
-    assert actions[0, 1] < -0.9
+@pytest.mark.parametrize('strategy',[2,3])
+def test_target_lost_or_dead_is_not_used(make_env,strategy):
+    env = make_env((1,0),(0,0))
+    env.positions[1,0],env.positions[0,0] = (0,0),(1000,0)
+    rule = RuleBasedOpponent(strategy)
+    rule.act(env)
+    assert rule.targets[0] == 0
+    env.positions[0,0] = (2000.001,0)
+    rule.act(env)
+    assert rule.targets[0] == -1
+    env.positions[0,0] = (1000,0)
+    env.alive[0,0] = False
+    rule.act(env)
+    assert rule.targets[0] == -1

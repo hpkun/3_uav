@@ -1,0 +1,9 @@
+# Environment/reward/MAPPO defaults are the Xu baseline in config.py.
+seed: 7
+training:
+  blue_strategy: 1
+  total_env_steps: 2000000
+  output_dir: runs/xu_course1_seed7
+  parallel_envs: 16
+  rollout_length: 128
+  device: cuda

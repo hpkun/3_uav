@@ -21,22 +21,25 @@ CSV_FIELDS = [
     "global_step",
     "episode",
     "return",
+    "total_return",
     "result",
     "red_alive",
     "blue_alive",
     "red_combat_kill",
     "blue_combat_kill",
-    "red_oob",
-    "blue_oob",
+    "red_outside_map",
+    "blue_outside_map",
+    "red_ever_outside",
+    "blue_ever_outside",
     "red_collision",
     "blue_collision",
-    "weapon_reward",
-    "oob_reward",
-    "collision_reward",
-    "near_collision_reward",
-    "event_reward",
-    "shaping_reward",
+    "kill_reward",
+    "own_loss_reward",
     "terminal_reward",
+    "timeout_reward",
+    "distance_reward",
+    "attack_angle_reward",
+    "collision_avoidance_reward",
     "episode_length",
 ]
 
@@ -70,12 +73,13 @@ def _training_log(
         f"alive(R/B)={_mean(rows, 'red_alive'):.2f}/{_mean(rows, 'blue_alive'):.2f} "
         f"combat_kill(R/B)={_mean(rows, 'red_combat_kill'):.2f}/"
         f"{_mean(rows, 'blue_combat_kill'):.2f} "
-        f"oob(R/B)={_mean(rows, 'red_oob'):.2f}/{_mean(rows, 'blue_oob'):.2f} "
+        f"outside(R/B)={_mean(rows, 'red_outside_map'):.2f}/{_mean(rows, 'blue_outside_map'):.2f} "
         f"collision(R/B)={_mean(rows, 'red_collision'):.2f}/{_mean(rows, 'blue_collision'):.2f} "
-        f"reward(weapon/oob/collision/near/shape/terminal)="
-        f"{_mean(rows, 'weapon_reward'):.3f}/{_mean(rows, 'oob_reward'):.3f}/"
-        f"{_mean(rows, 'collision_reward'):.3f}/{_mean(rows, 'near_collision_reward'):.3f}/"
-        f"{_mean(rows, 'shaping_reward'):.3f}/{_mean(rows, 'terminal_reward'):.3f} "
+        f"reward(kill/loss/terminal/timeout/dist/angle/avoid)="
+        f"{_mean(rows, 'kill_reward'):.2f}/{_mean(rows, 'own_loss_reward'):.2f}/"
+        f"{_mean(rows, 'terminal_reward'):.2f}/{_mean(rows, 'timeout_reward'):.2f}/"
+        f"{_mean(rows, 'distance_reward'):.3f}/{_mean(rows, 'attack_angle_reward'):.3f}/"
+        f"{_mean(rows, 'collision_avoidance_reward'):.3f} "
         f"length={_mean(rows, 'episode_length'):.1f} "
         f"actor={metrics['actor_loss']:.4f} critic={metrics['critic_loss']:.4f} "
         f"entropy={metrics['entropy']:.4f} kl={metrics['approx_kl']:.5f} "
@@ -115,7 +119,9 @@ def _is_better_evaluation(
     )
 
 
-def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
+def run_training(config: ProjectConfig, *, resume: str | None = None, init_checkpoint: str | None = None) -> Path:
+    if resume and init_checkpoint:
+        raise ValueError("--resume and --init-checkpoint are mutually exclusive")
     set_seed(config.seed)
     training = config.training
     if training.total_env_steps % training.parallel_envs:
@@ -132,6 +138,8 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
     global_step = 0
     episode_index = 0
     best_evaluation: dict[str, float] | None = None
+    if init_checkpoint:
+        learner.load(init_checkpoint, load_optimizers=False)
     if resume:
         checkpoint = learner.load(resume)
         global_step = int(checkpoint.get("global_step", 0))
@@ -174,12 +182,13 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
         config.render,
         Path.cwd(),
         base_seed=config.seed + global_step,
+        blue_strategy=training.blue_strategy,
     )
-    observations, states, active_masks, _ = environments.reset()
+    observations, states, active_masks, action_masks, _ = environments.reset()
     print(
         f"[START] total_env_steps={training.total_env_steps} "
         f"rollout={training.rollout_length} parallel={training.parallel_envs} "
-        f"device={device} pids={environments.worker_pids}",
+        f"device={device} blue_strategy={training.blue_strategy} pids={environments.worker_pids}",
         flush=True,
     )
     try:
@@ -191,10 +200,11 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
             buffer = RolloutBuffer(
                 horizon, training.parallel_envs, UAVCombatEnv.N_AGENTS,
                 UAVCombatEnv.OBS_DIM, UAVCombatEnv.STATE_DIM,
+                UAVCombatEnv.N_ACTIONS,
             )
             for _ in range(horizon):
                 actions, log_probabilities, values = learner.act(
-                    observations, states, active_masks
+                    observations, states, active_masks, action_masks
                 )
                 result = environments.step(actions)
                 buffer.insert(
@@ -206,6 +216,7 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
                     result.rewards,
                     result.dones,
                     active_masks,
+                    action_masks,
                 )
                 global_step += training.parallel_envs
                 for info in result.infos:
@@ -239,6 +250,7 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
                 observations = result.observations
                 states = result.states
                 active_masks = result.active_masks
+                action_masks = result.action_masks
 
             last_values = learner.values(states)
             buffer.compute_returns_and_advantages(
@@ -317,10 +329,13 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train fixed 5v5 red MAPPO against radar-constrained scripted blue"
+        description="Train categorical MAPPO in the Xu-thesis-aligned 5v5 baseline"
     )
     parser.add_argument("--config", default="configs/base.yaml")
-    parser.add_argument("--resume", default=None)
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument("--resume", default=None)
+    initialization.add_argument("--init-checkpoint", default=None)
+    parser.add_argument("--blue-strategy", type=int, choices=(1, 2, 3), default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--device", default=None)
@@ -339,7 +354,9 @@ def main() -> None:
         config.training.device = args.device
     if args.seed is not None:
         config.seed = args.seed
-    checkpoint = run_training(config, resume=args.resume)
+    if args.blue_strategy is not None:
+        config.training.blue_strategy = args.blue_strategy
+    checkpoint = run_training(config, resume=args.resume, init_checkpoint=args.init_checkpoint)
     print(f"[DONE] checkpoint={checkpoint}")
 
 

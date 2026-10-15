@@ -1,52 +1,44 @@
-# 固定 5v5 二维无人机空战与 MAPPO
+# Xu-thesis-aligned 5v5 baseline
 
-面向科研实验的二维定高（2D constant altitude）基础环境：红方 5 架同质 UAV 使用共享 MLP MAPPO，蓝方 5 架 UAV 使用遵守雷达限制的确定性规则策略。固定 5v5，不提供任意 NvN 框架。
+基于徐金辉论文第3章环境定义和第4章课程框架构建的二维同高度、固定5v5对齐基线。论文未公开的实现细节采用明确记录的项目约定；本项目只实现vanilla shared-team MLP MAPPO，不实现注意力、GRU、沙普利或威胁度信用分配。
 
-## 环境
+完整参数、论文对齐表和实现选择见 [环境规范](docs/environment_spec.md)，实际行为、测试和50k短训练结果见 [Xu验收报告](docs/validation_xu_5v5.md)。此前continuous 5v5、500k或旧3v3训练结果均不作为当前基线的有效结果；旧checkpoint不兼容，不提供迁移。
 
-| 项目 | 默认值与语义 |
+| 场景 | 当前定义 |
 |---|---|
-| 地图 | 10 km × 10 km，坐标 ±5000 m |
-| 动力学 | 连续 acceleration / turn_rate，dt=1 s |
-| 速度 / 加速度 / 转率 | 150–250 m/s；±20 m/s²；±15 deg/s |
-| 回合长度 | 最多 150 steps；任一队全灭也终止 |
-| 初始化 | x=±3500；y=[-3000,-1500,0,1500,3000]；位置 ±200 m、航向 ±5°、速度 190–210 m/s 独立采样 |
-| 雷达 | 4 km deterministic circular radar，存活队友探测结果立即完美共享（perfect team information sharing），无记忆 |
-| Actor | 68D partial observation：自身 5D + 4 个友机与 5 个敌机的 7D 固定 slots |
-| Critic | 60D full global state：R0–R4、B0–B4，每架 6D |
-| 动作 / 环境观测 / reward | (2,5,2) / (2,5,68) / (2,5) |
-| 自动武器 | 1.2 km，前向攻击半角 ±15°，尾后薄弱半角 ±50° |
-| 碰撞 | 所有阵营组合，150 m，使用一步 swept trajectory 连续最小距离 |
-| 接近辅助惩罚 | 450 m 内仍在接近的存活 pair，scale=0.05 |
-| 蓝方 | 雷达约束目标分配、800 m 尾后追踪、速度控制、500 m 边界恢复 |
+| 名义地图 / 回合 | 10km×10km / 最多300steps |
+| 初始 / 最小 / 最大速度 | 100 / 50 / 150 m/s |
+| 初始heading | 红0，蓝pi，无航向扰动 |
+| 离散动作 | 0–4：速度增量[-1,-.5,0,.5,1]；5–9：角增量[-5,-2,0,2,5]° |
+| 位移时序 | 使用v_t和heading_t移动，再应用动作到v_(t+1)/heading_(t+1) |
+| 雷达 | 2km确定性探测，队内完美共享，无记忆 |
+| 自动武器 | 600m，前向半角15°，目标尾后半角50° |
+| 碰撞 / 避碰 / 辅助奖励 | 150m swept collision / 最近机450m动作约束 / 最近机<600m距离差奖励 |
+| Actor / Critic | 68D局部固定slot / 60D全局状态，均为项目编码选择 |
+| action / action mask | 整个env(2,5)整数 / 红方(5,10)bool |
+| Actor / Critic网络 | 68–128–128–10 Categorical / 60–128–128–1 |
 
-初始化为 independent but distributionally symmetric initialization：两边边际分布严格对称，单局不逐机镜像，同 seed 完全可复现。
+位置分布沿用x=±3500m、y=[-3000,-1500,0,1500,3000]m及各坐标±200m独立扰动；精确出生区间和dt=1s是project convention。名义地图没有OOB死亡、惩罚、反射、teleport或物理clamp，归一化坐标可以超过1，渲染仅裁剪绘图坐标。
 
-未知和死亡敌机的 Actor slots 全零；友机始终已知；死亡 Actor 全零。Critic 可以读取完整真实状态。weapon / OOB / collision 为互斥死亡原因，combat kill 只统计武器击毁。
+当最近存活飞机（任意阵营）距离≤450m，动作仅允许朝远离方向转向的三个steering actions：alpha≥约0时{5,6,7}，alpha<0时{7,8,9}。规则双方均优先选±5°避碰。死亡实体仅允许canonical no-op 2，active mask为0。MAPPO在采样和PPO重算时使用同一份rollout action mask。
 
-每队共享 reward：
+团队reward为以下七项之和，辅助项先逐存活agent计算再求team mean：
 
 ```text
-R_team = weapon_reward + oob_reward + collision_reward
-       + near_collision_reward + terminal_reward + shaping_reward
-weapon_reward = 1 * weapon_kills - 1 * weapon_losses
-oob_reward = -1 * own_oob
-collision_reward = -2 * own_collision_losses
-near_collision_reward = 每架接近飞机 -0.05 * clip((d_prev-d_curr)/450,0,1)
-terminal_reward = win:+5 / loss:-5 / draw:0
-shape_red = 0.1 * (0.99*Phi_next - Phi_current)
-shape_blue = -shape_red
+kill_reward = +20 * weapon_kills
+own_loss_reward = -20 * (own_weapon_deaths + own_collision_deaths)
+terminal_reward = 对方全灭:+100 / 己方全灭:-100 / 双方同时全灭:0
+timeout_reward = 双方仍有存活且到300步时，数量优势:+80 / 劣势:-80 / 平:0
+distance_reward = mean((d_prev_nearest_detected-d_curr_nearest_detected)/1000)
+                  仅前后都有contact且d_prev>1500m
+attack_angle_reward = mean(min_abs_alpha_prev-min_abs_alpha_curr)，radians
+collision_avoidance_reward = mean((d_curr_nearest-d_prev_same_aircraft)/1000)
+                            仅当前最近机距离<600m
 ```
 
-敌方自身 OOB/collision 不给本方即时正奖励，因此红蓝总 reward 不强制零和。势函数只使用各队当前探测到的敌机；详细数学定义和事件顺序见 [环境规范](docs/environment_spec.md)。
+任务奖励采用相加实现，最后一架武器击杀可同时产生+20和+100。损失和辅助项的shared-team aggregation、单位转换、同时全灭处理等均在环境规范中明确标为适配/约定。
 
-## 代码
-
-`env.py` 实现动力学、雷达、攻击、碰撞、reward 和观测；`opponents.py` 仅保留正式规则策略。`parallel_env.py` 是每环境一个常驻进程的真实并行采样，terminal worker 自动 reset。`mappo.py` 保持共享 Actor、centralized critic、team GAE 和 dead-agent mask。
-
-Actor 为 `68–128–128–2`，Critic 为 `60–128–128–1`，只调整输入维度，网络层次和 PPO 算法不变。无导弹轨迹、弹药、开火动作、锁定、探测概率、通信网络仿真或自博弈。仓库根目录 PDF 为研究资料，`对抗环境图.png` 为渲染素材。
-
-## WSL 环境和验证
+## WSL运行
 
 ```bash
 wsl -d Ubuntu
@@ -57,31 +49,41 @@ python -m pip install -e . --no-deps
 pytest -q
 uav2d-train --config configs/smoke.yaml
 uav2d-evaluate --config configs/smoke.yaml \
-  --checkpoint runs/smoke_fixed_5v5/checkpoints/final.pt --episodes 20
-python scripts/sanity_check.py --mode all --episodes 100
+  --checkpoint runs/smoke_xu_5v5/checkpoints/final.pt --episodes 20
+python scripts/sanity_check.py --mode all --episodes 100 \
+  --output runs/xu_validation/rule_sanity.json
 ```
 
-Smoke 是短 CPU 链路验证，4 次 PPO update；不用于衡量策略性能。Sanity 的 random、passive、nearest pure pursuit 仅在脚本内部实现，pursuit 同样遵守队伍雷达信息。JSON 包含胜负、存活、武器击毁、OOB、碰撞、长度、return。blue_combat_share 分母包括蓝方击毁、红方 OOB 与红方碰撞损失。
+Smoke为1280env steps、2进程、10次PPO update、CPU，验证离散动作、掩码、保存与加载链路。
 
-## 正式训练
+## 三阶段课程
 
 ```bash
-uav2d-train --config configs/base.yaml --output runs/fixed_5v5_seed7
+# Course1：Strategy1，2M interactions
+uav2d-train --config configs/xu_course1.yaml
+
+# Course2：Strategy2，新增2M；只加载权重，重置optimizer、step和评估记录
+uav2d-train --config configs/xu_course2.yaml \
+  --init-checkpoint runs/xu_course1_seed7/checkpoints/final.pt
+
+# Course3：Strategy3，新增6M
+uav2d-train --config configs/xu_course3.yaml \
+  --init-checkpoint runs/xu_course2_seed7/checkpoints/final.pt
 ```
 
-默认 CUDA、16 并行环境、rollout=128×16，总预算 2,000,000 environment steps。每个向量 step 增加 16 steps；rollout 可包含多个回合。GAE 在 terminal 停止，非 terminal rollout 尾部由 V(s) bootstrap。PPO 参数保持 clip=0.2、gamma=0.99、lambda=0.95、10 epochs、minibatch=512。
+`--resume path`保留原有优化器、global_step、episode counter、best evaluation的断点恢复语义；`--init-checkpoint path`只加载Actor/Critic权重，两者互斥。课程配置默认CUDA、16独立进程、rollout128、共享Actor和team GAE。PPO超参数沿用项目，不声称复现论文完整算法超参数表。
 
-默认输出目录为 `runs/fixed_5v5`，上述 seed7 命令使用独立目录。终端每约 20k steps 输出最近 100 个完整回合的 return、W/D/L、alive、weapon kill、OOB、collision、六项 reward 分量、长度及 PPO 指标。相同数据写入 `episodes.csv` 和 TensorBoard。
+`base.yaml`为Course1环境的展开配置。可用`--blue-strategy 1|2|3`覆盖训练或评估蓝方；定期评估使用与该课程相同的策略。独立测试示例：
 
 ```bash
-tensorboard --logdir runs/fixed_5v5_seed7/tensorboard
-uav2d-evaluate --config configs/base.yaml \
-  --checkpoint runs/fixed_5v5_seed7/checkpoints/best.pt \
+uav2d-evaluate --config configs/xu_course3.yaml \
+  --checkpoint runs/xu_course3_seed7/checkpoints/best.pt \
   --episodes 500 --seed-start 2000000
+tensorboard --logdir runs/xu_course1_seed7/tensorboard
 ```
 
-周期评估使用固定 seed 集合；最终研究报告应另取独立 seeds。`--gif path/to/replay.gif` 可保存首个评估回合。
+终端输出最近100个完整回合的return、W/D/L、武器击杀、碰撞、存活、outside diagnostic、七项reward和PPO指标。CSV包含return/total_return及各分量，TensorBoard记录每个回合和每次update，EV使用更新后的critic。
 
-检查点有周期 `step_XXXXXXXXX.pt`、按评估胜率再按存活差选取的 `best.pt`、训练结束的 `final.pt`。继续同版本训练时使用 `--resume path/to/checkpoint.pt`。
+## 当前验证边界
 
-旧 3v3 checkpoint 的 Actor/Critic 输入维度不同，与新 5v5 模型不兼容；不提供迁移层。历史训练文件保留在原目录，新实验应使用独立目录。
+81项测试通过，三种规则各100局和50k Course1短训练已执行，但尚未证实可学习攻击：本次规则sanity和50k训练均没有武器击杀。Strategy3仍有较多碰撞，450m动作约束已核对严格生效；dt=1s和旧航向位移使某些迎头情况在转向生效前进入碰撞范围。另有较多存活飞机飞出名义地图。请依据验收报告的数据决定后续实验，不将“数值链路正常”等同于“论文行为效果已恢复”。
