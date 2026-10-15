@@ -23,8 +23,11 @@ class EnvironmentConfig:
     spawn_jitter: float = 200.0
     heading_jitter_degrees: float = 5.0
     attack_range: float = 1_200.0
-    attack_ata_degrees: float = 30.0
-    attack_aspect_degrees: float = 45.0
+    radar_range: float = 4_000.0
+    attack_ata_degrees: float = 15.0
+    attack_aspect_degrees: float = 50.0
+    collision_distance: float = 150.0
+    collision_warning_distance: float = 450.0
     potential_distance_scale: float = 3_000.0
     blue_assignment_interval: int = 5
     blue_tail_distance: float = 800.0
@@ -33,7 +36,12 @@ class EnvironmentConfig:
 
 @dataclass
 class RewardConfig:
-    terminal_reward: float = 3.0
+    weapon_kill_reward: float = 1.0
+    weapon_loss_penalty: float = 1.0
+    oob_penalty: float = 1.0
+    collision_penalty: float = 2.0
+    near_collision_scale: float = 0.05
+    terminal_reward: float = 5.0
     shaping_scale: float = 0.1
     shaping_gamma: float = 0.99
 
@@ -73,7 +81,7 @@ class TrainingConfig:
     checkpoint_interval_steps: int = 100_000
     evaluation_interval_steps: int = 100_000
     evaluation_episodes: int = 100
-    output_dir: str = "runs/fixed_3v3"
+    output_dir: str = "runs/fixed_5v5"
     device: str = "cuda"
 
 

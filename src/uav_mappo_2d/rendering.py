@@ -194,8 +194,8 @@ class CombatRenderer:
 
         status = (
             f"step={env.step_count:03d}  "
-            f"RED {int(env.alive[0].sum())}/3  "
-            f"BLUE {int(env.alive[1].sum())}/3"
+            f"RED {int(env.alive[0].sum())}/{env.N_AGENTS}  "
+            f"BLUE {int(env.alive[1].sum())}/{env.N_AGENTS}"
         )
         draw.rectangle(
             (cfg.margin, 10, cfg.width - cfg.margin, 32), fill=(255, 255, 255, 220)

@@ -27,7 +27,7 @@ class RuleBasedOpponent:
 
     def _assign_targets(self, env: UAVCombatEnv, team: int) -> None:
         friends = [int(index) for index in np.flatnonzero(env.alive[team])]
-        enemies = [int(index) for index in np.flatnonzero(env.alive[1 - team])]
+        enemies = [int(index) for index in np.flatnonzero(env.team_detected_enemy_mask(team))]
         self.targets.fill(-1)
         if not friends or not enemies:
             self._last_assignment_step = env.step_count
@@ -71,10 +71,10 @@ class RuleBasedOpponent:
     def _needs_assignment(self, env: UAVCombatEnv, team: int) -> bool:
         if env.step_count - self._last_assignment_step >= env.config.blue_assignment_interval:
             return True
-        enemy = 1 - team
+        detected = env.team_detected_enemy_mask(team)
         for agent in np.flatnonzero(env.alive[team]):
             target = int(self.targets[int(agent)])
-            if target < 0 or not env.alive[enemy, target]:
+            if (target < 0 and detected.any()) or (target >= 0 and not detected[target]):
                 return True
         return False
 
@@ -102,33 +102,35 @@ class RuleBasedOpponent:
         for agent in np.flatnonzero(env.alive[team]):
             agent = int(agent)
             target = int(self.targets[agent])
-            if target < 0 or not env.alive[enemy, target]:
-                continue
+            has_target = target >= 0
+            desired_speed = cfg.speed_max
             if self._flying_outward(env, team, agent):
                 target_point = np.zeros(2, dtype=np.float64)
-            else:
+            elif has_target:
                 target_heading = env.headings[enemy, target]
                 target_point = env.positions[enemy, target] - cfg.blue_tail_distance * np.array(
                     [math.cos(target_heading), math.sin(target_heading)]
                 )
-            delta = target_point - env.positions[team, agent]
-            desired_heading = math.atan2(float(delta[1]), float(delta[0]))
-            heading_error = float(wrap_angle(desired_heading - env.headings[team, agent]))
-            actions[agent, 1] = np.clip(
-                heading_error / (cfg.max_turn_rate * cfg.dt), -1.0, 1.0
-            )
-
-            target_distance = self._distance(env, team, agent, target)
-            if target_distance > 2.0 * cfg.attack_range:
-                desired_speed = cfg.speed_max
             else:
-                desired_speed = float(
-                    np.clip(
-                        env.speeds[enemy, target] + 20.0,
-                        cfg.speed_min,
-                        cfg.speed_max,
-                    )
+                target_point = None
+            if target_point is not None:
+                delta = target_point - env.positions[team, agent]
+                desired_heading = math.atan2(float(delta[1]), float(delta[0]))
+                heading_error = float(wrap_angle(desired_heading - env.headings[team, agent]))
+                actions[agent, 1] = np.clip(
+                    heading_error / (cfg.max_turn_rate * cfg.dt), -1.0, 1.0
                 )
+
+            if has_target:
+                target_distance = self._distance(env, team, agent, target)
+                if target_distance <= 2.0 * cfg.attack_range:
+                    desired_speed = float(
+                        np.clip(
+                            env.speeds[enemy, target] + 20.0,
+                            cfg.speed_min,
+                            cfg.speed_max,
+                        )
+                    )
             actions[agent, 0] = np.clip(
                 (desired_speed - env.speeds[team, agent])
                 / (cfg.max_acceleration * cfg.dt),

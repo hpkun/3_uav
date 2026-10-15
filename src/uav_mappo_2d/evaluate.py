@@ -99,6 +99,8 @@ def evaluate_policy(
         ),
         "red_oob": float(np.mean([row["red_oob"] for row in rows])),
         "blue_oob": float(np.mean([row["blue_oob"] for row in rows])),
+        "red_collision": float(np.mean([row["red_collision"] for row in rows])),
+        "blue_collision": float(np.mean([row["blue_collision"] for row in rows])),
         "mean_episode_length": float(
             np.mean([row["episode_length"] for row in rows])
         ),
@@ -108,7 +110,7 @@ def evaluate_policy(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate deterministic red MAPPO against scripted blue"
+        description="Evaluate fixed 5v5 deterministic red MAPPO against radar-constrained blue"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--checkpoint", required=True)
@@ -123,7 +125,10 @@ def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
     device = resolve_device(args.device or config.training.device)
-    policy = MAPPO(40, 36, 3, config.mappo, device, seed=config.seed)
+    policy = MAPPO(
+        UAVCombatEnv.OBS_DIM, UAVCombatEnv.STATE_DIM, UAVCombatEnv.N_AGENTS,
+        config.mappo, device, seed=config.seed,
+    )
     policy.load(args.checkpoint, load_optimizers=False)
     policy.actor.eval()
     policy.critic.eval()

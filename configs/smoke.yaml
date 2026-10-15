@@ -13,5 +13,5 @@ training:
   checkpoint_interval_steps: 64
   evaluation_interval_steps: 64
   evaluation_episodes: 4
-  output_dir: "runs/smoke_fixed_3v3"
+  output_dir: "runs/smoke_fixed_5v5"
   device: "cpu"

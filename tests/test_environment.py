@@ -38,16 +38,16 @@ def test_reset_is_independent_distributionally_symmetric_and_reproducible() -> N
     headings = env.headings.copy()
     speeds = env.speeds.copy()
     state = info["global_state"].copy()
-    assert observations.shape == (2, 3, 40)
-    assert env.observation_space.shape == (2, 3, 40)
-    assert env.action_space.shape == (2, 3, 2)
-    assert info["global_state"].shape == (36,)
+    assert observations.shape == (2, 5, 68)
+    assert env.observation_space.shape == (2, 5, 68)
+    assert env.action_space.shape == (2, 5, 2)
+    assert info["global_state"].shape == (60,)
     assert np.isfinite(observations).all()
     assert np.isfinite(info["global_state"]).all()
     assert np.max(np.abs(observations)) <= 1.0 + 1e-6
     assert np.all((-3_700.0 <= positions[0, :, 0]) & (positions[0, :, 0] <= -3_300.0))
     assert np.all((3_300.0 <= positions[1, :, 0]) & (positions[1, :, 0] <= 3_700.0))
-    base_y = np.array([-1_500.0, 0.0, 1_500.0])
+    base_y = np.array([-3_000.0, -1_500.0, 0.0, 1_500.0, 3_000.0])
     assert np.all(np.abs(positions[0, :, 1] - base_y) <= 200.0)
     assert np.all(np.abs(positions[1, :, 1] - base_y) <= 200.0)
     assert np.all(np.abs(headings[0]) <= math.radians(5.0))
@@ -105,7 +105,7 @@ def test_synchronous_mutual_kill() -> None:
     env.positions[0, 1] = (500.0, 1000.0)
     env.headings[0, 1] = env.headings[1, 1] = math.pi
     env.speeds.fill(150.0)
-    _, _, _, _, info = env.step(np.zeros((2, 3, 2), dtype=np.float32))
+    _, _, _, _, info = env.step(np.zeros((2, 5, 2), dtype=np.float32))
     assert not env.alive[1, 0]
     assert not env.alive[0, 1]
     assert info["combat_kills"] == [1, 1]
@@ -118,11 +118,11 @@ def test_multiple_attackers_count_one_target_once() -> None:
     env.alive[0, :2] = True
     env.alive[1, 0] = True
     env.positions[0, 0] = (0.0, 0.0)
-    env.positions[0, 1] = (-100.0, 0.0)
+    env.positions[0, 1] = (-200.0, 0.0)
     env.positions[1, 0] = (500.0, 0.0)
     env.headings.fill(0.0)
     env.speeds.fill(150.0)
-    _, _, done, _, info = env.step(np.zeros((2, 3, 2), dtype=np.float32))
+    _, _, done, _, info = env.step(np.zeros((2, 5, 2), dtype=np.float32))
     assert done
     assert info["combat_kills"] == [1, 0]
     assert info["episode_summary"]["red_combat_kill"] == 1
@@ -136,7 +136,7 @@ def test_out_of_bounds_dies_immediately_and_cannot_attack() -> None:
     env.speeds[0, 0] = 150.0
     env.positions[1, 0] = (4_990.0, 0.0)
     env.headings[1, 0] = math.pi
-    _, rewards, _, _, info = env.step(np.zeros((2, 3, 2), dtype=np.float32))
+    _, rewards, _, _, info = env.step(np.zeros((2, 5, 2), dtype=np.float32))
     assert not env.alive[0, 0]
     assert info["oob"][0] == 1
     assert info["combat_kills"][0] == 0
@@ -150,7 +150,7 @@ def test_reward_components_and_terminal_timeout() -> None:
     env.positions[0, :, 0] = -4_000.0
     env.positions[1, :, 0] = 4_000.0
     _, rewards, terminated, truncated, info = env.step(
-        np.zeros((2, 3, 2), dtype=np.float32)
+        np.zeros((2, 5, 2), dtype=np.float32)
     )
     assert terminated and not truncated
     assert info["result"] == "draw"

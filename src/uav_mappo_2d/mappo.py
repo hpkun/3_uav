@@ -18,9 +18,9 @@ class RolloutBuffer:
         self,
         horizon: int,
         num_envs: int,
-        num_agents: int = 3,
-        observation_dim: int = 40,
-        state_dim: int = 36,
+        num_agents: int,
+        observation_dim: int,
+        state_dim: int,
     ) -> None:
         self.horizon = int(horizon)
         self.num_envs = int(num_envs)

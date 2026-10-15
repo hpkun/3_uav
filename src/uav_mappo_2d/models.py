@@ -12,7 +12,7 @@ def _init_layer(layer: nn.Linear, gain: float = 1.0) -> nn.Linear:
 
 
 class GaussianActor(nn.Module):
-    def __init__(self, observation_dim: int = 40, hidden_size: int = 128) -> None:
+    def __init__(self, observation_dim: int, hidden_size: int = 128) -> None:
         super().__init__()
         self.network = nn.Sequential(
             _init_layer(nn.Linear(observation_dim, hidden_size), 2**0.5),
@@ -55,7 +55,7 @@ class GaussianActor(nn.Module):
 
 
 class CentralizedCritic(nn.Module):
-    def __init__(self, state_dim: int = 36, hidden_size: int = 128) -> None:
+    def __init__(self, state_dim: int, hidden_size: int = 128) -> None:
         super().__init__()
         self.network = nn.Sequential(
             _init_layer(nn.Linear(state_dim, hidden_size), 2**0.5),

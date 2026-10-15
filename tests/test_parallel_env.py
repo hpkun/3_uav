@@ -22,13 +22,20 @@ def test_parallel_workers_and_terminal_auto_reset(tmp_path) -> None:
         assert len(set(environments.worker_pids)) == 2
         assert os.getpid() not in environments.worker_pids
         observations, states, masks, _ = environments.reset()
-        assert observations.shape == (2, 3, 40)
-        assert states.shape == (2, 36)
-        assert masks.shape == (2, 3)
-        result = environments.step(np.zeros((2, 3, 2), dtype=np.float32))
+        assert observations.shape == (2, 5, 68)
+        assert states.shape == (2, 60)
+        assert masks.shape == (2, 5)
+        result = environments.step(np.zeros((2, 5, 2), dtype=np.float32))
         assert np.all(result.dones == 1.0)
         assert all("episode_summary" in info for info in result.infos)
         assert np.all(result.active_masks == 1.0)
-        assert result.observations.shape == (2, 3, 40)
+        assert result.observations.shape == (2, 5, 68)
+        assert result.states.shape == (2, 60)
+        for info in result.infos:
+            assert "red_collision" in info["episode_summary"]
+        second = environments.step(np.zeros((2, 5, 2), dtype=np.float32))
+        assert np.all(second.dones == 1.0)
+        again, _, _, _ = environments.reset()
+        np.testing.assert_array_equal(again, observations)
     finally:
         environments.close()

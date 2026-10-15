@@ -15,15 +15,23 @@ environment:
   spawn_jitter: 200.0
   heading_jitter_degrees: 5.0
   attack_range: 1200.0
-  attack_ata_degrees: 30.0
-  attack_aspect_degrees: 45.0
+  radar_range: 4000.0
+  attack_ata_degrees: 15.0
+  attack_aspect_degrees: 50.0
+  collision_distance: 150.0
+  collision_warning_distance: 450.0
   potential_distance_scale: 3000.0
   blue_assignment_interval: 5
   blue_tail_distance: 800.0
   blue_boundary_margin: 500.0
 
 reward:
-  terminal_reward: 3.0
+  weapon_kill_reward: 1.0
+  weapon_loss_penalty: 1.0
+  oob_penalty: 1.0
+  collision_penalty: 2.0
+  near_collision_scale: 0.05
+  terminal_reward: 5.0
   shaping_scale: 0.1
   shaping_gamma: 0.99
 
@@ -57,5 +65,5 @@ training:
   checkpoint_interval_steps: 100000
   evaluation_interval_steps: 100000
   evaluation_episodes: 100
-  output_dir: "runs/fixed_3v3"
+  output_dir: "runs/fixed_5v5"
   device: "cuda"

@@ -39,7 +39,7 @@ def _turn_toward(env: UAVCombatEnv, team: int, agent: int, point: np.ndarray) ->
 
 
 def _passive_red_actions(env: UAVCombatEnv) -> np.ndarray:
-    actions = np.zeros((3, 2), dtype=np.float32)
+    actions = np.zeros((env.N_AGENTS, env.ACTION_DIM), dtype=np.float32)
     for agent in np.flatnonzero(env.alive[0]):
         agent = int(agent)
         if _flying_outward(env, 0, agent):
@@ -54,15 +54,13 @@ def _passive_red_actions(env: UAVCombatEnv) -> np.ndarray:
 
 
 def _pursuit_red_actions(env: UAVCombatEnv) -> np.ndarray:
-    actions = np.zeros((3, 2), dtype=np.float32)
-    enemies = [int(index) for index in np.flatnonzero(env.alive[1])]
-    if not enemies:
-        return actions
+    actions = np.zeros((env.N_AGENTS, env.ACTION_DIM), dtype=np.float32)
+    enemies = [int(index) for index in np.flatnonzero(env.team_detected_enemy_mask(0))]
     for agent in np.flatnonzero(env.alive[0]):
         agent = int(agent)
         if _flying_outward(env, 0, agent):
             target_point = np.zeros(2)
-        else:
+        elif enemies:
             target = min(
                 enemies,
                 key=lambda index: (
@@ -75,7 +73,10 @@ def _pursuit_red_actions(env: UAVCombatEnv) -> np.ndarray:
                 ),
             )
             target_point = env.positions[1, target]
-        actions[agent, 1] = _turn_toward(env, 0, agent, target_point)
+        else:
+            target_point = None
+        if target_point is not None:
+            actions[agent, 1] = _turn_toward(env, 0, agent, target_point)
         actions[agent, 0] = np.clip(
             (env.config.speed_max - env.speeds[0, agent])
             / (env.config.max_acceleration * env.config.dt),
@@ -108,6 +109,8 @@ def _summarize(rows: list[dict[str, float | str]], mode: str) -> dict[str, objec
         "mean_blue_combat_kills": mean("blue_combat_kill"),
         "mean_red_oob": mean("red_oob"),
         "mean_blue_oob": mean("blue_oob"),
+        "mean_red_collision": mean("red_collision"),
+        "mean_blue_collision": mean("blue_collision"),
         "mean_episode_length": mean("episode_length"),
         "mean_red_return": mean("return"),
     }
@@ -119,9 +122,10 @@ def _summarize(rows: list[dict[str, float | str]], mode: str) -> dict[str, objec
     else:
         blue_kills = float(result["mean_blue_combat_kills"])
         red_oob = float(result["mean_red_oob"])
+        red_collision = float(result["mean_red_collision"])
         result["diagnostics"] = {
-            "blue_combat_share": blue_kills / max(blue_kills + red_oob, 1e-12),
-            "formula": "mean_blue_combat_kills / (mean_blue_combat_kills + mean_red_oob)",
+            "blue_combat_share": blue_kills / max(blue_kills + red_oob + red_collision, 1e-12),
+            "formula": "mean_blue_combat_kills / max(mean_blue_combat_kills + mean_red_oob + mean_red_collision, 1e-12)",
         }
     return result
 
@@ -144,7 +148,9 @@ def run_scenario(
             if mode == "rule-vs-rule":
                 red_actions = red_rule.act(env, 0)
             elif mode == "random-vs-rule":
-                red_actions = rng.uniform(-1.0, 1.0, size=(3, 2)).astype(np.float32)
+                red_actions = rng.uniform(
+                    -1.0, 1.0, size=(env.N_AGENTS, env.ACTION_DIM)
+                ).astype(np.float32)
             elif mode == "passive-vs-rule":
                 red_actions = _passive_red_actions(env)
             elif mode == "pursuit-vs-rule":
@@ -160,7 +166,7 @@ def run_scenario(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Fixed 3v3 environment sanity checks")
+    parser = argparse.ArgumentParser(description="Fixed 5v5 environment sanity checks")
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--seed-start", type=int, default=200_000)

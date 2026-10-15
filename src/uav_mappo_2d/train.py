@@ -11,6 +11,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from .config import ProjectConfig, load_config
+from .env import UAVCombatEnv
 from .evaluate import evaluate_policy, resolve_device
 from .mappo import MAPPO, RolloutBuffer
 from .parallel_env import ParallelUAVEnvs
@@ -27,6 +28,12 @@ CSV_FIELDS = [
     "blue_combat_kill",
     "red_oob",
     "blue_oob",
+    "red_collision",
+    "blue_collision",
+    "weapon_reward",
+    "oob_reward",
+    "collision_reward",
+    "near_collision_reward",
     "event_reward",
     "shaping_reward",
     "terminal_reward",
@@ -64,8 +71,11 @@ def _training_log(
         f"combat_kill(R/B)={_mean(rows, 'red_combat_kill'):.2f}/"
         f"{_mean(rows, 'blue_combat_kill'):.2f} "
         f"oob(R/B)={_mean(rows, 'red_oob'):.2f}/{_mean(rows, 'blue_oob'):.2f} "
-        f"reward(event/shape)={_mean(rows, 'event_reward'):.3f}/"
-        f"{_mean(rows, 'shaping_reward'):.3f} "
+        f"collision(R/B)={_mean(rows, 'red_collision'):.2f}/{_mean(rows, 'blue_collision'):.2f} "
+        f"reward(weapon/oob/collision/near/shape/terminal)="
+        f"{_mean(rows, 'weapon_reward'):.3f}/{_mean(rows, 'oob_reward'):.3f}/"
+        f"{_mean(rows, 'collision_reward'):.3f}/{_mean(rows, 'near_collision_reward'):.3f}/"
+        f"{_mean(rows, 'shaping_reward'):.3f}/{_mean(rows, 'terminal_reward'):.3f} "
         f"length={_mean(rows, 'episode_length'):.1f} "
         f"actor={metrics['actor_loss']:.4f} critic={metrics['critic_loss']:.4f} "
         f"entropy={metrics['entropy']:.4f} kl={metrics['approx_kl']:.5f} "
@@ -115,7 +125,10 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     tensorboard = SummaryWriter(output_dir / "tensorboard")
-    learner = MAPPO(40, 36, 3, config.mappo, device, seed=config.seed)
+    learner = MAPPO(
+        UAVCombatEnv.OBS_DIM, UAVCombatEnv.STATE_DIM, UAVCombatEnv.N_AGENTS,
+        config.mappo, device, seed=config.seed,
+    )
     global_step = 0
     episode_index = 0
     best_evaluation: dict[str, float] | None = None
@@ -175,7 +188,10 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
                 training.total_env_steps - global_step
             ) // training.parallel_envs
             horizon = min(training.rollout_length, remaining_vector_steps)
-            buffer = RolloutBuffer(horizon, training.parallel_envs)
+            buffer = RolloutBuffer(
+                horizon, training.parallel_envs, UAVCombatEnv.N_AGENTS,
+                UAVCombatEnv.OBS_DIM, UAVCombatEnv.STATE_DIM,
+            )
             for _ in range(horizon):
                 actions, log_probabilities, values = learner.act(
                     observations, states, active_masks
@@ -301,7 +317,7 @@ def run_training(config: ProjectConfig, *, resume: str | None = None) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train fixed 3v3 red MAPPO against scripted blue"
+        description="Train fixed 5v5 red MAPPO against radar-constrained scripted blue"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--resume", default=None)
