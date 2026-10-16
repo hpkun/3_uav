@@ -45,3 +45,17 @@ V2.4验收只跑Greedy-vs-Greedy的100个固定seed200000–200099。validate_v2
 正式采样仍为CUDA learner、16个独立持久环境进程、rollout128，未修改训练参数；短smoke沿用CPU/2workers/64宽配置。默认配置输出目录命名保留V2.1，后续实验用--output单独指定Blue版本目录，不覆盖历史数据。评估、resume/init-checkpoint接口不变，不添加课程或Categorical迁移。
 
 日志保留双方alive、weapon kill/loss、OOB、collision events、window、contact、length、五reward与八PPO指标；collision events现在指endpoint unique participants。45%达到300步和OOB等问题本轮不改；是否进入50k由用户审查V2.4验收后决定，不自动长训。
+
+## 单文件 HTML 录像（只读）
+
+完整用法和时间对齐说明见[HTML回放文档](docs/html_replay.md)。以下在WSL的conda uav中执行；生成文件可直接双击离线播放，无CDN/图片帧/JSON旁文件，不改环境或checkpoint，也不自动打开浏览器。
+
+```bash
+PYTHONPATH=src python scripts/replay_html.py \
+  --config configs/base.yaml \
+  --checkpoint runs/v2_4_mappo_2m_seed7/checkpoints/best.pt \
+  --seed 3000000 --device cuda \
+  --output runs/v2_4_mappo_2m_seed7/replays/best_seed3000000.html
+```
+
+默认deterministic，与正式evaluate一致；加`--stochastic`则按seed采样。省略`--output`默认生成`runs/replays/<checkpoint_stem>_seed<seed>.html`。已存在的输出会拒绝覆盖，请改文件名。原GIF功能不变。

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__PAGE_TITLE__</title>
+<style>
+:root{color-scheme:light;--bg:#eef1f5;--paper:#fff;--ink:#202937;--muted:#657185;--grid:#e3e8ef;--line:#ccd4df;--red:#cf354f;--blue:#2669cf;--radar:#258859;--attack:#cf7b19}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}header{padding:20px 28px 12px}h1{font-size:21px;margin:0 0 4px;font-weight:650}h2{font-size:15px;margin:0 0 10px}p{margin:4px 0}.muted{color:var(--muted)}.meta{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.layout{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:16px;max-width:1450px;margin:0 auto;padding:0 24px 24px}.panel{background:var(--paper);border-radius:10px;padding:16px}.battle{padding:8px 12px 16px}canvas{display:block;width:100%;height:auto;aspect-ratio:1;max-width:900px;margin:0 auto}aside{display:flex;flex-direction:column;gap:12px}.row{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.controls{border-top:1px solid var(--grid);padding:12px 4px 0}.timeline{display:flex;align-items:center;gap:12px;margin:12px 0}input[type=range]{flex:1;min-width:100px;accent-color:var(--blue)}button,select{font:inherit;color:inherit;border:1px solid var(--line);background:var(--paper);border-radius:6px;padding:6px 10px}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}button#play{min-width:82px;background:var(--ink);color:var(--paper);border-color:var(--ink)}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-offset:2px}label{display:inline-flex;align-items:center;gap:6px}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td,th{padding:3px 0;border-bottom:1px solid var(--grid);text-align:right}th:first-child,td:first-child{text-align:left}th{font-weight:550;color:var(--muted)}.red{color:var(--red)}.blue{color:var(--blue)}.number{font-variant-numeric:tabular-nums}.small{font-size:12px}.note{margin-top:9px;color:var(--muted);font-size:12px}#event-log{max-height:240px;overflow:auto;white-space:pre-wrap;margin:0;font:12px/1.65 ui-monospace,monospace}.rl-info{white-space:pre-line;font-variant-numeric:tabular-nums;margin:9px 0 0}.legend{gap:16px;margin:4px 12px}.legend span{display:inline-flex;align-items:center;gap:5px}@media(max-width:1000px){.layout{grid-template-columns:1fr;padding:0 12px 18px}aside{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}header{padding:16px}.panel{padding:12px}}
+@media(prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#151c27;--paper:#1e2837;--ink:#e8edf6;--muted:#a7b5c9;--grid:#334257;--line:#4b5c73;--red:#fa8192;--blue:#78b1ff;--radar:#72ce9e;--attack:#efb36a}}
+</style>
+</head>
+<body>
+<header><h1>V2.4 · 5v5 空战回放</h1><p id="metadata" class="meta muted"></p><p id="episode-meta" class="meta"></p></header>
+<main class="layout">
+<section class="panel battle" aria-label="二维空战轨迹与播放控制">
+<canvas id="battlefield" width="1000" height="1000" role="img" aria-label="10km等比例战场，红蓝飞机航向及当前步之前的历史轨迹">需要支持Canvas的浏览器。</canvas>
+<div class="row legend"><span class="red">▲ Red R0–R4</span><span class="blue">▲ Blue B0–B4</span><span class="muted">× weapon death · OOB 越界死亡</span></div>
+<div class="controls">
+<div class="row"><button id="play" type="button" aria-pressed="false">Play</button><button id="previous" type="button">上一帧</button><button id="next" type="button">下一帧</button><label>Speed <select id="speed"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option><option value="8">8x</option></select></label><span id="clock" class="number"></span></div>
+<div class="timeline"><label for="timeline">Timeline</label><input id="timeline" type="range" min="0" value="0" step="1"><output id="frame-number" for="timeline"></output></div>
+<div class="row"><label><input id="trails" type="checkbox" checked>Show trails</label><label>Selected UAV <select id="selected-uav"><option value="">None</option></select></label><label><input id="radar" type="checkbox">Show Radar</label><label><input id="attack" type="checkbox">Show Attack Range</label></div>
+<p class="note">Space 播放/暂停 · ←/→ 逐帧。圆圈只作范围示意，不表示当前合法攻击窗口；不改变探测或武器规则。轨迹只绘制至当前步。</p>
+</div>
+</section>
+<aside>
+<section class="panel"><h2>当前状态 / 累计事件</h2><p id="checkpoint-state" class="meta muted small"></p><p id="current-state" class="number"></p><table><thead><tr><th>Metric</th><th class="red">Red</th><th class="blue">Blue</th></tr></thead><tbody id="counts"></tbody></table></section>
+<section class="panel"><h2>当前步 Red reward</h2><p id="reward" class="number"></p><table><tbody id="components"></tbody></table><p class="note">显示进入当前帧的真实 info 奖励（t−1 → t）；step 0 为初始零奖励。</p></section>
+<section class="panel"><h2>Pre-action RL 控制</h2><p id="value" class="number"></p><label>Selected Red Agent <select id="red-agent"><option>R0</option><option>R1</option><option>R2</option><option>R3</option><option>R4</option></select></label><p id="actor" class="rl-info"></p><p id="std-info" class="note"></p><p class="note">V(sₜ)、动作和 μ 属于当前状态即将执行的 t → t+1；μ 是 pre-tanh mean。终局没有下一步动作或 V。std 为全局学习参数，不随状态变化。</p></section>
+<section class="panel"><h2>Event Log</h2><pre id="event-log" aria-live="polite"></pre><p class="note">按时间列出至当前帧；死亡ID由OOB/weapon顺序重构并与实际 info 增量核对。</p></section>
+</aside>
+</main>
+<script id="replay-data" type="application/json">__TRACE_JSON__</script>
+<script>
+'use strict';
+const trace=JSON.parse(document.getElementById('replay-data').textContent);
+const frames=trace.frames, meta=trace.metadata, summary=trace.episode_summary;
+const el=id=>document.getElementById(id), canvas=el('battlefield'), ctx=canvas.getContext('2d');
+const labels=Array.from({length:10},(_,i)=>(i<5?'R':'B')+(i%5));
+const css=name=>getComputedStyle(document.documentElement).getPropertyValue('--'+name).trim();
+const fmt=(v,n=3)=>v===null||v===undefined?'N/A':Number(v).toFixed(n);
+const mapSize=10000, pad=58, side=Math.min(canvas.width,canvas.height)-2*pad;
+function worldToCanvas(x,y){return [(canvas.width-side)/2+(x+5000)/mapSize*side,(canvas.height-side)/2+(5000-y)/mapSize*side];}
+let index=0, playing=false, lastTime=null, elapsed=0;
+el('timeline').max=String(frames.length-1);
+for(const label of labels){const o=document.createElement('option');o.value=label;o.textContent=label;el('selected-uav').appendChild(o);}
+el('metadata').textContent=`${meta.checkpoint_filename} · global_step ${meta.checkpoint_global_step??'unknown'} · seed ${meta.seed} · ${meta.deterministic?'deterministic':'stochastic'} · environment ${meta.environment_version}`;
+el('checkpoint-state').textContent=el('metadata').textContent;
+el('episode-meta').textContent=`Recorded episode result: ${summary.result} · length ${summary.episode_length} · Red return ${fmt(summary.return)} · ${frames.length} frames`;
+el('std-info').textContent=`checkpoint log_std (raw): [${meta.actor_log_std_raw.map(x=>fmt(x)).join(', ')}]; effective: [${meta.actor_log_std_effective.map(x=>fmt(x)).join(', ')}]`;
+
+function pathFor(team,agent,stop){
+  const points=[];
+  for(let i=0;i<=stop;i++){
+    const f=frames[i];if(points.length===0&&!f.alive[team][agent])break;
+    points.push(f.positions[team][agent]);if(!f.alive[team][agent])break;
+  }return points;
+}
+function line(points,color,width=1.7){if(!points.length)return;ctx.beginPath();points.forEach((p,i)=>{const [x,y]=worldToCanvas(...p);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();}
+function deathReason(label){for(let i=1;i<=index;i++){const e=frames[i].events;if(e?.oob_victims.includes(label))return 'OOB';if(e?.weapon_victims.includes(label))return '×';}return '×';}
+function draw(){
+  const f=frames[index], ink=css('ink'), paper=css('paper'), muted=css('muted');
+  ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle=paper;ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.font='13px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';
+  for(const v of [-5000,-2500,0,2500,5000]){
+    const [x,y]=worldToCanvas(v,v);ctx.strokeStyle=css('grid');ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,pad);ctx.lineTo(x,pad+side);ctx.moveTo(pad,y);ctx.lineTo(pad+side,y);ctx.stroke();ctx.fillStyle=muted;ctx.fillText(String(v),x,pad+side+21);ctx.fillText(String(v),pad-27,y);
+  }
+  ctx.strokeStyle=css('line');ctx.lineWidth=1.5;ctx.strokeRect(pad,pad,side,side);ctx.fillStyle=ink;ctx.fillText('x (m)',500,canvas.height-12);ctx.save();ctx.translate(13,500);ctx.rotate(-Math.PI/2);ctx.fillText('y (m)',0,0);ctx.restore();
+  const selected=el('selected-uav').value;
+  if(selected){const team=selected[0]==='R'?0:1,agent=Number(selected[1]);if(f.alive[team][agent]){
+    const [x,y]=worldToCanvas(...f.positions[team][agent]);ctx.save();ctx.beginPath();ctx.rect(pad,pad,side,side);ctx.clip();
+    for(const [id,radius,color]of [['radar',meta.config.environment.radar_range,'radar'],['attack',meta.config.environment.attack_range,'attack']]){
+      if(!el(id).checked)continue;ctx.beginPath();ctx.arc(x,y,radius/mapSize*side,0,2*Math.PI);ctx.strokeStyle=css(color);ctx.lineWidth=1.5;ctx.setLineDash([7,6]);ctx.stroke();
+    }ctx.restore();
+  }}
+  for(let team=0;team<2;team++)for(let agent=0;agent<5;agent++){
+    const label=(team===0?'R':'B')+agent,color=css(team===0?'red':'blue');
+    const points=pathFor(team,agent,index);if(el('trails').checked){ctx.globalAlpha=.42;line(points,color);ctx.globalAlpha=1;}
+    const pos=f.alive[team][agent]?f.positions[team][agent]:points[points.length-1];if(!pos)continue;
+    const [x,y]=worldToCanvas(...pos);ctx.save();ctx.translate(x,y);ctx.fillStyle=color;ctx.strokeStyle=paper;
+    if(f.alive[team][agent]){
+      ctx.save();ctx.rotate(-f.headings[team][agent]);ctx.beginPath();ctx.moveTo(11,0);ctx.lineTo(-7,-5.5);ctx.lineTo(-4,0);ctx.lineTo(-7,5.5);ctx.closePath();ctx.fill();ctx.lineWidth=selected===label?2:1;ctx.stroke();ctx.restore();
+    }else{ctx.fillStyle=muted;ctx.font='bold 15px system-ui';ctx.textAlign='center';ctx.fillText(deathReason(label),0,0);}
+    ctx.fillStyle=f.alive[team][agent]?color:muted;ctx.font='12px system-ui';ctx.textAlign='left';ctx.fillText(label,11,-10);ctx.restore();
+  }
+  const events=f.events;
+  if(events){for(const label of [...events.collision_participants,...events.weapon_victims]){
+    const team=label[0]==='R'?0:1,agent=Number(label[1]),[x,y]=worldToCanvas(...f.positions[team][agent]);const kill=events.weapon_victims.includes(label);ctx.beginPath();ctx.arc(x,y,kill?20:12,0,2*Math.PI);ctx.strokeStyle=css(kill?'attack':'muted');ctx.globalAlpha=kill ? .8 : .35;ctx.lineWidth=kill?2:1;ctx.stroke();ctx.globalAlpha=1;
+  }}
+  el('clock').textContent=`step ${f.step} · time ${fmt(f.time,1)} s`;
+  el('frame-number').textContent=`${index} / ${frames.length-1}`;el('timeline').value=String(index);
+  el('previous').disabled=index===0;el('next').disabled=index===frames.length-1;
+  el('current-state').textContent=`step ${f.step} · ${fmt(f.time,1)} s · ${index===frames.length-1?summary.result:'ongoing'}`;
+  const metrics=[['Alive','alive'],['Weapon kills','combat_kill'],['Weapon losses','weapon_loss'],['OOB','oob'],['Collision events','collision_events'],['Attack windows','attack_window'],['Radar contact steps','radar_contact_steps']];
+  el('counts').replaceChildren();for(const [name,key]of metrics){const row=document.createElement('tr');for(const v of [name,f.counts['red_'+key],f.counts['blue_'+key]]){const td=document.createElement('td');td.textContent=v;row.appendChild(td);}el('counts').appendChild(row);}
+  el('reward').textContent=`Step reward ${fmt(f.team_rewards[0])} · cumulative ${fmt(f.cumulative_red_reward)}`;
+  el('components').replaceChildren();for(const [key,values]of Object.entries(f.reward_components)){const row=document.createElement('tr');for(const v of [key,fmt(values[0])]){const td=document.createElement('td');td.textContent=v;row.appendChild(td);}el('components').appendChild(row);}
+  const red=Number(el('red-agent').value[1]);el('value').textContent=`V(s${index}) = ${fmt(f.critic_value,4)}`;
+  if(!f.alive[0][red])el('actor').textContent='inactive — agent dead';
+  else if(!f.rl_available)el('actor').textContent='terminal — no next action / Actor evaluation';
+  else el('actor').textContent=`a_norm: ${fmt(f.actions_red[red][0],4)}\nomega_norm: ${fmt(f.actions_red[red][1],4)}\nmu_accel: ${fmt(f.actor_mu_red[red][0],4)}\nmu_turn: ${fmt(f.actor_mu_red[red][1],4)}\nstd_accel: ${fmt(f.actor_std[0],4)}\nstd_turn: ${fmt(f.actor_std[1],4)}`;
+  const logs=[];for(let i=1;i<=index;i++){
+    const e=frames[i].events,inc=e.increments,parts=[];
+    for(const [key,name]of [['red_combat_kill','Red weapon kill'],['blue_combat_kill','Blue weapon kill'],['red_weapon_loss','Red weapon loss'],['blue_weapon_loss','Blue weapon loss'],['red_oob','Red OOB'],['blue_oob','Blue OOB'],['red_collision_events','Red collision participant'],['blue_collision_events','Blue collision participant'],['red_attack_window','Red attack window'],['blue_attack_window','Blue attack window']])if(inc[key]>0)parts.push(`${name} +${inc[key]}`);
+    if(e.weapon_victims.length)parts.push(`weapon victims: ${e.weapon_victims.join(',')}`);if(e.oob_victims.length)parts.push(`OOB victims: ${e.oob_victims.join(',')}`);if(e.collision_participants.length)parts.push(`collision: ${e.collision_participants.join(',')}`);
+    if(parts.length)logs.push(`step ${i}: ${parts.join('; ')}`);
+  }el('event-log').textContent=logs.length?logs.join('\n'):'No events up to this frame.';el('event-log').scrollTop=el('event-log').scrollHeight;
+}
+function pause(){playing=false;lastTime=null;elapsed=0;el('play').textContent='Play';el('play').setAttribute('aria-pressed','false');}
+function toggle(){if(playing)pause();else{if(index===frames.length-1)index=0;playing=true;lastTime=null;elapsed=0;el('play').textContent='Pause';el('play').setAttribute('aria-pressed','true');}draw();}
+function seek(n){pause();index=Math.max(0,Math.min(frames.length-1,n));draw();}
+el('play').addEventListener('click',toggle);el('previous').addEventListener('click',()=>seek(index-1));el('next').addEventListener('click',()=>seek(index+1));el('timeline').addEventListener('input',()=>seek(Number(el('timeline').value)));
+for(const id of ['selected-uav','red-agent','trails','radar','attack'])el(id).addEventListener('change',draw);
+el('speed').addEventListener('change',()=>{lastTime=null;elapsed=0;});
+document.addEventListener('keydown',event=>{if(['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName))return;if(event.code==='Space'){event.preventDefault();toggle();}else if(event.key==='ArrowLeft'){event.preventDefault();seek(index-1);}else if(event.key==='ArrowRight'){event.preventDefault();seek(index+1);}});
+function tick(timestamp){if(playing){if(lastTime===null)lastTime=timestamp;elapsed+=timestamp-lastTime;lastTime=timestamp;const interval=meta.config.environment.dt*1000/Number(el('speed').value);let changed=false;while(elapsed>=interval&&playing){elapsed-=interval;index++;changed=true;if(index>=frames.length-1){index=frames.length-1;pause();}}if(changed)draw();}requestAnimationFrame(tick);}
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
+draw();requestAnimationFrame(tick);
+</script>
+</body>
+</html>
