@@ -59,3 +59,7 @@ PYTHONPATH=src python scripts/replay_html.py \
 ```
 
 默认deterministic，与正式evaluate一致；加`--stochastic`则按seed采样。省略`--output`默认生成`runs/replays/<checkpoint_stem>_seed<seed>.html`。已存在的输出会拒绝覆盖，请改文件名。原GIF功能不变。
+
+## 独立 MADDPG baseline
+
+新增5个独立Actor、5个centralized Critic及各自target、joint replay与OU探索；正式V2.4环境和MAPPO完全不变。算法参考profile见`configs/maddpg.yaml`，环境仍读`configs/base.yaml`。结构、公式、适配说明、正式训练/评估命令与短程验证见[MADDPG文档](docs/maddpg_baseline.md)。本轮仅完成测试和2560步smoke，未执行2M；MADDPG checkpoint与MAPPO格式不兼容。
