@@ -1,4 +1,7 @@
-"""Tests of external audit mathematics only; production env is not patched."""
+"""V2.3 historical swept mathematics plus explicit V2.4 mapping checks.
+
+Historical Current remains swept/-5; it is not the current production reward.
+"""
 from pathlib import Path
 import sys
 
@@ -86,6 +89,7 @@ def components():
 def test_liu_recompute_and_other_components_unchanged():
     actual = components()
     result = recompute(actual, 10, 4, 2)
+    assert result['Current']['collision_reward'] == -50  # V2.3 historical meaning
     assert result['Liu-style']['collision_reward'] == -.8
     assert result['Liu-style']['total'] == pytest.approx(9.2)
     assert actual == components()
@@ -107,7 +111,7 @@ def test_zero_denominator_absolute_share():
     assert all(r['collision_absolute_share'] == 0 for r in recompute(actual, 0, 0, 0).values())
 
 
-def test_current_recompute_matches_unmodified_env(make_env, zero_actions):
+def test_v24_production_matches_historical_liu_counterfactual(make_env, zero_actions):
     env = make_env((0, 0), (0, 1), (1, 0))
     env.positions[0, 0], env.positions[0, 1], env.positions[1, 0] = (0, 0), (30, 0), (4000, 4000)
     env.headings.fill(0)
@@ -119,8 +123,9 @@ def test_current_recompute_matches_unmodified_env(make_env, zero_actions):
     assert sets['swept'] == {0, 1}
     actual = {k: info[k] for k in components()}
     mapped = recompute(actual, 2, 2, 2)
-    assert mapped['Current']['collision_reward'] == info['collision_reward'] == -10
-    assert mapped['Current']['total'] == info['total_reward']
+    assert mapped['Current']['collision_reward'] == -10  # V2.3 historical mapping
+    assert mapped['Liu-style']['collision_reward'] == info['collision_reward'] == -.4
+    assert mapped['Liu-style']['total'] == info['total_reward']
 
 
 def test_pre_weapon_mask_keeps_weapon_victims(make_env, zero_actions):

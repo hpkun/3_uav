@@ -32,7 +32,7 @@ def test_self_penalty_no_positive_opponent_event(make_env,zero_actions,cause,tea
         expected = -20
     else:
         env.positions[team,1],env.positions[team,2] = (0,0),(40,0)
-        expected = -10
+        expected = -.4
     _,reward,done,_,info = env.step(zero_actions)
     assert not done and info['kill_reward'] == info['weapon_loss_reward'] == 0
     np.testing.assert_allclose(reward[team],expected)
@@ -48,7 +48,8 @@ def test_cross_team_collision_penalty_without_death_or_terminal(make_env,zero_ac
     assert not done and env.alive.sum() == 2
     assert info['collision_events'] == [1,1]
     assert info['kill_reward'] == info['weapon_loss_reward'] == info['terminal_reward'] == 0
-    np.testing.assert_allclose(reward,-5)
+    assert info['collision_reward'] == -.2
+    np.testing.assert_allclose(reward,-.2)
 
 
 def test_collision_and_weapon_reward_can_coexist(make_env,zero_actions):
@@ -58,8 +59,8 @@ def test_collision_and_weapon_reward_can_coexist(make_env,zero_actions):
     env.speeds.fill(100)
     _,reward,done,_,info = env.step(zero_actions)
     assert done
-    assert info['kill_reward'] == 10 and info['collision_reward'] == -10
-    assert info['terminal_reward'] == 20 and info['total_reward'] == 20
+    assert info['kill_reward'] == 10 and info['collision_reward'] == -.4
+    assert info['terminal_reward'] == 20 and info['total_reward'] == pytest.approx(29.6)
     np.testing.assert_allclose(reward[1],-30)
 
 

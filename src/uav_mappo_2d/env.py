@@ -17,7 +17,7 @@ def wrap_angle(angle: float | np.ndarray) -> float | np.ndarray:
 
 
 class UAVCombatEnv(gym.Env):
-    """Literature-constrained continuous 5v5 baseline V2.1."""
+    """Continuous 5v5 baseline V2.4 with non-lethal endpoint collision events."""
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 5}
     N_AGENTS = 5
@@ -125,10 +125,9 @@ class UAVCombatEnv(gym.Env):
 
     def step(self, actions):
         actions = self.validate_actions(actions, self.action_space.shape)
-        previous_positions = self.positions.copy()
         self._update_kinematics(actions)
         oob = self._resolve_out_of_bounds()
-        collisions = self._resolve_collisions(previous_positions)
+        collisions = self._resolve_collisions()
         kills = self._resolve_attacks()
         self.step_count += 1
         terminated = self._is_terminal()
@@ -175,19 +174,13 @@ class UAVCombatEnv(gym.Env):
         self.oob_losses += losses
         return losses
 
-    def _resolve_collisions(self, previous_positions):
+    def _resolve_collisions(self):
         first, second = np.triu_indices(2 * self.N_AGENTS, k=1)
         valid = self.alive.ravel()[first] & self.alive.ravel()[second]
         first, second = first[valid], second[valid]
-        previous, current = previous_positions.reshape(-1, 2), self.positions.reshape(-1, 2)
-        r0 = previous[first] - previous[second]
-        displacement = current - previous
-        dr = displacement[first] - displacement[second]
-        denominator = np.sum(dr * dr, axis=1)
-        tau = np.zeros(len(first))
-        np.divide(-np.sum(r0 * dr, axis=1), denominator, out=tau, where=denominator > 1e-12)
-        closest = r0 + np.clip(tau, 0, 1)[:, None] * dr
-        collided = np.sum(closest * closest, axis=1) <= self.config.collision_distance**2
+        current = self.positions.reshape(-1, 2)
+        delta = current[first] - current[second]
+        collided = np.sum(delta * delta, axis=1) <= self.config.collision_distance**2
         involved = np.unique(np.concatenate((first[collided], second[collided])))
         events = np.bincount(involved // self.N_AGENTS, minlength=2).astype(np.int32)
         # Safety events only: even an involved UAV may fire in this same step.

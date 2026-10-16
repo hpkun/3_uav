@@ -170,34 +170,38 @@ def test_weapon_target_nearest_then_id(make_env,offset,victim):
     assert not env.alive[1,victim] and env.alive[1,1-victim]
 
 
-@pytest.mark.parametrize('same_team',[False,True])
-@pytest.mark.parametrize('distance,collided',[(50,True),(50.001,False)])
-def test_collision_threshold_all_team_combinations(make_env,zero_actions,same_team,distance,collided):
-    second = (0,1) if same_team else (1,0)
-    env = make_env((0,0),second,attack_range=1)
-    env.positions[0,0],env.positions[second] = (0,0),(distance,0)
+@pytest.mark.parametrize('first,second,events',[
+    ((0,0),(0,1),[2,0]), ((1,0),(1,1),[0,2]), ((0,0),(1,0),[1,1]),
+])
+@pytest.mark.parametrize('distance,collided',[(49.9,True),(50,True),(50.001,False)])
+def test_collision_threshold_all_team_combinations(make_env,zero_actions,first,second,events,distance,collided):
+    env = make_env(first,second,attack_range=1)
+    env.positions[first],env.positions[second] = (0,0),(distance,0)
     env.headings.fill(0)
     env.speeds.fill(100)
     env.step(zero_actions)
-    assert env.alive[(0,0)] and env.alive[second]
-    assert int(env.collision_events.sum()) == (2 if collided else 0)
+    assert env.alive[first] and env.alive[second]
+    assert env.collision_events.tolist() == (events if collided else [0,0])
     assert not env.combat_kills.any() and not env.weapon_losses.any()
 
 
-def test_swept_collision_with_both_endpoints_outside_and_multi_pair(make_env,zero_actions):
+def test_swept_only_crossing_is_not_production_collision(make_env,zero_actions):
     env = make_env((0,0),(1,0))
     env.positions[0,0],env.positions[1,0] = (-100,0),(100,0)
     env.headings[0,0],env.headings[1,0] = 0,math.pi
     env.speeds.fill(150)
     env.step(zero_actions)
     assert np.linalg.norm(env.positions[0,0]-env.positions[1,0]) == pytest.approx(100)
-    assert env.collision_events.tolist() == [1,1] and env.combat_kills.tolist() == [0,0]
+    assert env.collision_events.tolist() == [0,0] and env.combat_kills.tolist() == [0,0]
     assert env.alive[0,0] and env.alive[1,0]
     old = env.positions.copy()
     env.step(zero_actions)
     assert np.linalg.norm(env.positions[0,0]-old[0,0]) == pytest.approx(150)
+
+
+def test_endpoint_collision_deduplicates_participants_each_step(make_env,zero_actions):
     env = make_env((0,0),(0,1),(1,0),attack_range=1)
-    env.positions[0,0],env.positions[0,1],env.positions[1,0] = (0,0),(40,0),(80,0)
+    env.positions[0,0],env.positions[0,1],env.positions[1,0] = (0,0),(40,0),(20,0)
     env.headings.fill(0)
     env.speeds.fill(100)
     env.step(zero_actions)
@@ -248,10 +252,30 @@ def test_oob_death_each_boundary_only_once(make_env,zero_actions,axis,sign,headi
 
 def test_oob_precedes_collision_and_weapon(make_env,zero_actions):
     env = make_env((0,0),(1,0))
-    env.positions[0,0],env.positions[1,0] = (4990,0),(4960,0)
-    env.headings[0,0],env.headings[1,0] = 0,math.pi
+    # Endpoints remain <50m, but the first UAV is already OOB and excluded.
+    env.positions[0,0],env.positions[1,0] = (4910,0),(4870,0)
+    env.headings[0,0],env.headings[1,0] = 0,0
     env.speeds.fill(100)
     env.step(zero_actions)
     assert env.oob_losses.tolist() == [1,0]
     assert env.collision_events.tolist() == env.weapon_losses.tolist() == [0,0]
     assert env.alive[1,0]
+
+
+def test_collision_empty_and_singleton_alive_sets(make_env):
+    env = make_env()
+    env.alive.fill(False)
+    assert env._resolve_collisions().tolist() == [0,0]
+    env.alive[0,0] = True
+    assert env._resolve_collisions().tolist() == [0,0]
+
+
+def test_same_endpoint_pair_can_collide_and_fire(make_env,zero_actions):
+    env = make_env((0,0),(1,0))
+    env.positions[0,0],env.positions[1,0] = (0,0),(40,0)
+    env.headings.fill(0)
+    env.speeds.fill(100)
+    _,_,done,_,info = env.step(zero_actions)
+    assert done and info['collision_events'] == [1,1]
+    assert info['combat_kills'] == [1,0] and info['weapon_losses'] == [0,1]
+    assert env.alive[0,0] and not env.alive[1,0]

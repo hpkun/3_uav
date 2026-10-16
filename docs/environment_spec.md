@@ -1,15 +1,15 @@
-# V2.3 Greedy-Shooter Blue：固定5v5连续二维基线
+# V2.4 Endpoint Collision：固定5v5连续二维Greedy基线
 
-基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。本轮仅将固定Blue换为Greedy-Shooter Rule Opponent；V2.1的动力学、初始化、Radar、Weapon、collision/OOB、Reward、Actor68D、Critic60D、Gaussian网络与PPO核心完全冻结。V2.3仅标识本次Blue-policy实验，不代表重构环境物理。
+基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。V2.4只将collision检测改为endpoint、penalty改为0.2；Greedy Blue、动力学、初始化、Radar、Weapon、OOB、其余Reward、Actor68D、Critic60D、Gaussian网络与PPO核心完全冻结。
 
 ## 1. 文献原则与实现约定分工
 
-本轮用PDF技能核对于欣萌论文的封面与第三章原文。正式Blue来源与冻结环境来源分开，不混用作者、题名或低层动作接口：
+正式Blue保留已核对的于欣萌第三章规则；本轮用PDF技能核对刘莹春碰撞公式。来源分开，不混用作者、题名或低层动作接口：
 
 - 于欣萌：《基于强化学习的无人机集群对抗方法研究》，大连理工大学硕士论文，2025，第3.2.2节(2)，PDF第40–41页/印刷页30–31，公式(3.17)–(3.19)：每步在探测内按欧氏距离选最近敌机，导航方向指向该目标当前位置，允许多机同目标，无显式协商/去冲突。论文原动作是二维连续控制力/导航向量，不是本项目的加速度/转率接口。此PDF未随项目保存，故只列作者、题名和章节，不创建本机绝对路径链接。
 - [孙笠晋、李智：基于多智能体强化学习的无人机对抗技术研究](../基于多智能体强化学习的无人机对抗技术研究_孙笠晋%20(1).pdf)，PDF第4页/印刷页58，第2节和3.1节：二维、速度/航向、加速度与角速度动作、10000m地图。原文8v8、MADDPG，不宣称本项目复现其算法或积分顺序。
 - 邓岩：《基于深度强化学习的无人机集群空战决策研究》，PDF第30页/印刷页21，表3.1：探测3000m、攻击1000m。该文含弹药、探测角、概率等，本项目只沿用距离尺度，不引入其余机制。
-- 刘莹春：《基于强化学习的无人机集群协同打击策略研究》，第3章3.2.3、3.3.1及式(3.11)，PDF第38–40页/印刷页27–29：碰撞作为安全惩罚事件，以及攻击/边界事件反馈。只保留该原则作为冻结的V2.1奖励语义来源，不借用其低层动作、概率攻击或空间尺度。未随项目保存的论文只列作者/题名/章节，不创建本机绝对路径链接。
+- 刘莹春：《基于强化学习的无人机集群协同打击策略研究》，第3章3.2.3、3.3.1及式(3.11)，PDF第38–40页/印刷页27–29：式(3.11)在当前中心距离<0.5时对个体施加-0.2，存在任一其它UAV即触发。V2.4采用当前距离小额安全惩罚思想与0.2系数；项目50m、inclusive ≤、shared-team按参与者累加、RR/BB/RB全部统计以及非致死时序是implementation adaptation。没有移植原文步进惩罚、概率攻击、空间尺度或低层动作。未随项目保存的论文只列作者/题名/章节，不创建本机绝对路径链接。
 
 | Item | Literature-supported principle | Current implementation | Literature parameter / implementation convention | Notes |
 |---|---|---|---|---|
@@ -24,12 +24,12 @@
 | 出生与heading | 独立随机初始化 | 红x[-3800,-3200]，蓝[3200,3800]，y[-3000,3000]、同队间隔500，航向±5° | implementation convention | 无镜像五航线 |
 | 68D / 60D编码 | 局部Actor/全局Critic | 固定ID slots、三角编码、valid、alive | implementation convention | 不用nearest-K |
 | 武器角度 | 距离与攻击/目标几何判定 | ATA±30°、aspect±45° | 冻结的implementation convention | 尤其45° target aspect不是上述文献直接参数 |
-| 碰撞 | 刘莹春式(3.11)以空间接近触发惩罚 | 50m swept检测、每步每机去重、不致死 | 原则有依据；50m与swept是implementation convention | 原文阈值/尺度/惩罚不照搬 |
+| 碰撞 | 刘莹春式(3.11)当前中心距离触发-0.2安全惩罚 | post-OOB/pre-weapon、endpoint ≤50m、RR/BB/RB、每步每机去重、不致死 | 50m、inclusive、shared-team累计、非致死时序为implementation adaptation | 不完整复现原文归一化环境 |
 | Blue目标选择 | 于欣萌(3.17)–(3.18)，探测内最近敌机 | 每机每步在team detected集合按(distance,ID)选目标 | 最近准则为文献规则；team sharing和等距ID为implementation adaptation/convention | 无target memory或assignment |
 | Blue移动方向 | 于欣萌(3.19)，导航向量沿p_target-p_own | desired=atan2(delta_y,delta_x)，经原有限转率control输出[0,omega_norm] | 方向有直接依据；有限转率与a_norm=0为implementation adaptation | 不照搬二维控制力或增益κ，不引入基地目标 |
 | 多机同目标 | 于欣萌PDF第41页，Greedy不去目标冲突 | 多架Blue可独立选择同一Red | 文献直接规则 | 无E-CBAA、capacity、Boids或显式协作 |
 | Blue边界返回 | 本轮明确指定的简化反向航向规则 | 当前heading名义预测下一步越界时，朝h+pi转向 | continuous finite-turn implementation adaptation | 不声称原文证明有限转率下必不出界；无margin |
-| Reward | 击毁/损失/碰撞/边界/结果的事件反馈原则 | +10/-10/-5/-20/±20，shared-team sum | 数值和shared-team reward adaptation为implementation convention | 不照搬原文步进惩罚或概率反馈 |
+| Reward | 击毁/损失/碰撞/边界/结果的事件反馈原则 | +10/-10/-0.2/-20/±20，shared-team sum | collision小额系数参考刘莹春，其余值及shared-team为项目约定 | 不照搬原文步进惩罚或概率反馈 |
 
 Greedy Shooter没有显式协商，不意味着本项目取消了冻结的team radar sharing：候选集仍来自team_detected_enemy_mask。论文中的导航方向被适配为目标bearing和有限转率控制，a_norm固定0并保留原boundary return；这些都标记为implementation adaptation，而非论文低层公式完全复现。
 
@@ -49,7 +49,7 @@ Greedy Shooter没有显式协商，不意味着本项目取消了冻结的team r
 | attack_ata_degrees / attack_aspect_degrees | 30° / 45°，半角，inclusive |
 | collision_distance | 50m，inclusive |
 | weapon_kill_reward / weapon_loss_penalty | 10 / 10 |
-| collision_penalty / oob_penalty / terminal_reward | 5 / 20 / 20 |
+| collision_penalty / oob_penalty / terminal_reward | 0.2 / 20 / 20 |
 | hidden_size / Actor / Critic | 128 / 68-128-128-2 / 60-128-128-1 |
 | log_std init / clamp | -.5 / [-5,1] |
 | actor_learning_rate / critic_learning_rate | 3e-4 / 3e-4 |
@@ -99,11 +99,13 @@ Weapon：d≤1000 AND |alpha|≤30° AND |beta|≤45°，无fire动作，直接�
 
 ## 5. Collision/OOB/terminal顺序
 
-validate → old positions → continuous movement → OOB → collision event detection → weapon collection → synchronous weapon → step+1 → terminal/winner → event reward → next obs/state/info。
+validate → continuous movement → OOB → endpoint collision event detection → weapon collection → synchronous weapon → step+1 → terminal/winner → event reward → next obs/state/info。
 
 OOB：移动后任一|coordinate|>5000则死亡，恰等于边界不死；不能参加本步collision/weapon，无clamp/reflect/teleport。
 
-Collision：沿本步同步线性运动段求最小中心距离，≤50m触发。友友、敌敌、敌我均检测；本步与任意其它活机发生碰撞的每架UAV计一次event，多pair不重复。本步计过后下一步再次接近仍可再计，因此累计events可超过5。collision不修改alive、不冻结运动、不直接终止回合，仍允许本步开火；若之后被weapon击毁，真正死亡原因仍是weapon。
+Collision：仅对movement后、OOB后仍alive的全部pair计算当前中心距离，≤50m触发。RR/BB/RB均检测；本步与任意其它活机发生碰撞的每架UAV计一次event，多pair不重复，按本队unique participants累计。本步计过后下一步仍近可再计，因此累计events可超过5。collision不修改alive、不冻结运动、不直接终止回合，仍允许本步开火；若之后被weapon击毁，真正死亡原因仍是weapon。生产函数不再复制previous positions、不计算relative segment/tau/swept距离；无near-miss observation/state/reward、cooldown或避碰。
+
+历史V2.3采用swept/-5；只读审计中58.95% pair-step为swept-only，71.88%为RB，collision pooled absolute share约58%。其报告与离线诊断保留，但不再定义V2.4正式事件。V2.4 endpoint会忽略两端均在50m外的中途近距交会，这是明确采用的检测语义差异，不宣称物理上不会穿越。
 
 只有weapon和OOB造成死亡：alive+weapon_losses+oob_losses=5（每队）。collision_events不加入死亡数或death share。后续策略动作可能受碰撞惩罚训练影响，但胜负函数不直接读取collision计数。
 
@@ -114,7 +116,7 @@ Collision：沿本步同步线性运动段求最小中心距离，≤50m触发�
 ```text
 kill_reward[T] = +10 * 本队本步真实weapon kills
 weapon_loss_reward[T] = -10 * 本队本步weapon deaths
-collision_reward[T] = -5 * 本队本步参与collision的独立UAV数
+collision_reward[T] = -0.2 * 本队本步参与endpoint collision的独立UAV数
 oob_reward[T] = -20 * 本队本步OOB deaths
 terminal_reward[T] = win:+20 / loss:-20 / draw或未终局:0
 R_team = 五项之和
@@ -162,4 +164,4 @@ death_total仅weapon_loss+oob，weapon_death_share分母0时为0。碰撞另报�
 
 episodes.csv逐回合；updates.csv每更新记录最近100回合均值/WDL与八PPO指标；TensorBoard/console同步。sanity四模式各100局：greedy-vs-greedy双方独立Greedy对象，random-vs-greedy红U(-1,1)²，passive-vs-greedy红[0,0]，direct-pursuit-vs-greedy红方使用原direct-pursuit helper。第四组是控制语义一致性对照，不是另一种强弱对手。本轮两个对称组100局统计完全相同，所有step helper与正式Red策略动作差为0。另记录timeout episode rate，不能把timeout等同draw。
 
-当前结果见[validation_v2_3_greedy_shooter.md](validation_v2_3_greedy_shooter.md)。validation_v2_1_5v5.md与validation_v2_2_rear_pursuit.md原样保留为历史，不覆盖原始数据。旧策略实验不能视为当前Blue训练证据。
+当前结果见[validation_v2_4_endpoint_collision.md](validation_v2_4_endpoint_collision.md)。validation_v2_1_5v5.md、validation_v2_2_rear_pursuit.md、validation_v2_3_greedy_shooter.md、collision_audit_v2_3.md原样保留为历史，不覆盖原始数据。旧swept审计的生产一致性断言只适用于V2.3；V2.4使用validate_v2_4.py逐步物理轨迹/逐局反事实验收。本轮只做pytest、100局Greedy验收与1280步smoke，不自动50k或2M。

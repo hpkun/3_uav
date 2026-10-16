@@ -40,7 +40,7 @@ class RewardConfig:
     weapon_kill_reward: float = 10.0
     weapon_loss_penalty: float = 10.0
     oob_penalty: float = 20.0
-    collision_penalty: float = 5.0
+    collision_penalty: float = 0.2
     terminal_reward: float = 20.0
 
 
