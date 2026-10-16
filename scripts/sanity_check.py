@@ -10,7 +10,7 @@ from uav_mappo_2d.env import UAVCombatEnv
 from uav_mappo_2d.opponents import RuleBasedOpponent
 
 
-MODES = ("rule-vs-rule", "random-vs-rule", "passive-vs-rule", "direct-pursuit-vs-rule")
+MODES = ("greedy-vs-greedy", "random-vs-greedy", "passive-vs-greedy", "direct-pursuit-vs-greedy")
 
 
 def pursuit_red_actions(env):
@@ -56,6 +56,7 @@ def summarize(rows):
     result['weapon_combat_episode_rate'] = sum(
         row['red_combat_kill'] + row['blue_combat_kill'] > 0 for row in rows
     ) / episodes
+    result['timeout_episode_rate'] = sum(row['timed_out'] for row in rows) / episodes
     return result
 
 
@@ -65,28 +66,36 @@ def run_scenario(config_path, mode, episodes, seed_start):
     red_rule, blue_rule = RuleBasedOpponent(), RuleBasedOpponent()
     rng = np.random.default_rng(seed_start + 9999991)
     rows = []
+    helper_max_difference = 0.
+    helper_exact_mismatch_steps = 0
     for episode in range(episodes):
         env.reset(seed=seed_start + episode)
         done = False
         while not done:
-            if mode == 'rule-vs-rule':
+            if mode == 'greedy-vs-greedy':
                 red = red_rule.act(env, 0)
-            elif mode == 'random-vs-rule':
+            elif mode == 'random-vs-greedy':
                 red = rng.uniform(-1, 1, (env.N_AGENTS, env.ACTION_DIM)).astype(np.float32)
-            elif mode == 'passive-vs-rule':
+            elif mode == 'passive-vs-greedy':
                 red = np.zeros((env.N_AGENTS, env.ACTION_DIM), dtype=np.float32)
-            elif mode == 'direct-pursuit-vs-rule':
+            elif mode == 'direct-pursuit-vs-greedy':
                 red = pursuit_red_actions(env)
             else:
                 raise ValueError(f'Unknown sanity mode: {mode}')
+            if mode in ('greedy-vs-greedy','direct-pursuit-vs-greedy'):
+                helper,formal = pursuit_red_actions(env),red_rule.act(env,0)
+                helper_max_difference = max(helper_max_difference,float(np.max(np.abs(helper-formal))))
+                helper_exact_mismatch_steps += int(not np.array_equal(helper,formal))
             _, _, done, _, info = env.step(np.stack([red, blue_rule.act(env, 1)]))
-        rows.append(info['episode_summary'])
+        rows.append({**info['episode_summary'], 'timed_out':env.step_count>=env.config.episode_steps})
     env.close()
-    return {'mode': mode, 'seed_start': seed_start, **summarize(rows)}
+    return {'mode': mode, 'seed_start': seed_start, **summarize(rows),
+            'helper_max_action_difference':helper_max_difference,
+            'helper_exact_mismatch_steps':helper_exact_mismatch_steps}
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Fixed 5v5 rear-aspect Blue behavioral sanity checks')
+    parser = argparse.ArgumentParser(description='V2.3 Greedy Shooter behavioral sanity checks')
     parser.add_argument('--config', default='configs/base.yaml')
     parser.add_argument('--mode', choices=('all', *MODES), default='all')
     parser.add_argument('--episodes', type=int, default=100)

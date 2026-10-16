@@ -7,7 +7,7 @@ from .env import UAVCombatEnv, wrap_angle
 
 
 class RuleBasedOpponent:
-    """Stateless nearest-detected-target rear-aspect pursuit."""
+    """Stateless Greedy Shooter: nearest detected target, direct constant-speed pursuit."""
 
     @staticmethod
     def control(env, team, agent, desired_heading):
@@ -35,13 +35,6 @@ class RuleBasedOpponent:
             float(np.linalg.norm(env.positions[1-team, j] - env.positions[team, agent])), int(j),
         ))
 
-    @staticmethod
-    def rear_point(env, team, target):
-        heading = env.headings[1-team, target]
-        return env.positions[1-team, target] - env.config.attack_range * np.array([
-            math.cos(heading), math.sin(heading),
-        ])
-
     def act(self, env, team=1):
         actions = np.zeros((UAVCombatEnv.N_AGENTS, UAVCombatEnv.ACTION_DIM), dtype=np.float32)
         detected = env.team_detected_enemy_mask(team)
@@ -51,8 +44,7 @@ class RuleBasedOpponent:
                 target = self.nearest_target(env, team, agent, detected)
                 if target is None:
                     continue
-                delta = self.rear_point(env, team, target) - env.positions[team, agent]
-                heading = (float(env.headings[1-team, target]) if np.linalg.norm(delta) < 1e-6
-                           else math.atan2(float(delta[1]), float(delta[0])))
+                delta = env.positions[1-team, target] - env.positions[team, agent]
+                heading = math.atan2(float(delta[1]), float(delta[0]))
             actions[agent] = self.control(env, team, agent, heading)
         return actions

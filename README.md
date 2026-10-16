@@ -1,27 +1,20 @@
-# 固定5v5连续二维对抗：Rear-Pursuit Blue
+# V2.3 Greedy-Shooter Blue
 
-基于V2.1冻结环境，仅将固定Blue更换为nearest-detected-target rear-aspect pursuit。红方vanilla continuous MAPPO；Blue唯一、无状态、恒速，仅通过有限转率控制航向。不是任何单篇论文的完全复现。
+固定连续二维5v5环境，仅更换正式固定Blue为Nearest-Target Direct-Pursuit Baseline Opponent。环境动力学、初始化、Radar/共享、68D Actor/60D Critic、Weapon、collision/OOB、Reward、Gaussian Actor/MAPPO和所有PPO超参数保持不变。
 
-优先级：Boundary Return > Rear-Aspect Pursuit > Straight Ingress。每步每机选最近detected敌机（等距小ID），朝其当前航向后方attack_range处接近，无目标[0,0]。不增加可调尾距、assignment、target memory、patrol、避碰控制或新reward shaping。
+Blue只有三层：Boundary Return > Greedy Direct Pursuit > Straight Flight。每机每步独立选择当前team detected敌机中最近者，等距小ID；期望heading直接指向目标当前位置，a_norm恒0。无目标[0,0]；死亡机零动作。无目标记忆、分配/去冲突、虚拟目标点、逃逸、避碰、Boids、FSM、patrol或调速。
 
-```text
-p_rear = p_target - attack_range*[cos(h_target),sin(h_target)]
-desired_heading = atan2(p_rear.y-own_y,p_rear.x-own_x)
-# 若距rear point<1e-6，仅回退target heading
-action = [0, clip(wrap(desired_heading-own_heading)/(max_turn_rate*dt),-1,1)]
-```
+文献依据：于欣萌《基于强化学习的无人机集群对抗方法研究》，第3.2.2节(2)、式(3.17)–(3.19)，PDF第40–41页/印刷页30–31。论文直接给出探测内最近敌机、沿目标当前位置方向逼近、允许多机同目标的规则。原文是二维导航/控制向量；本项目采用冻结team radar共享、目标bearing→有限转率控制、a_norm=0和原boundary return，属于implementation adaptation，不是论文低层公式完全复现。
 
-“绕到敌机后方”的战术思想参考孙世彬《基于多智能体强化学习的大规模无人机集群博弈对抗研究》第三章固定规则交战阶段；rear-point公式和以attack_range作为接近点距离尺度均为implementation convention，不是论文公开控制公式。作者/题名、项目PDF相对文件名、页码及其他冻结环境来源见[环境规范](docs/environment_spec.md)。
-
-本轮实际测试与行为数据见[Rear-Pursuit验收报告](docs/validation_v2_2_rear_pursuit.md)；[V2.1历史验收](docs/validation_v2_1_5v5.md)原样保留。新策略的闭环效果必须根据本轮sanity判断，不依据历史50k结果；本轮不运行50k或2M。
+完整参数与来源见[环境规范](docs/environment_spec.md)；84项测试、smoke、4×100 sanity、三代对比和轨迹审计见[V2.3验收](docs/validation_v2_3_greedy_shooter.md)。V2.1/V2.2验证原样保留为历史。本轮未运行50k或2M。
 
 ## 冻结环境
 
-固定5v5、dt1s、最多300步、10km方形地图；速度50–150m/s，初速95–105m/s；连续加速度±10m/s²、转率±10°/s，先更新速度/heading再移动。3km确定性Radar，队内即时共享、无记忆。Actor68D局部固定slot，Critic60D真实全局。
+10km方形地图、dt1s、最多300步；速度50–150m/s、初速95–105m/s；连续加速度±10m/s²、转率±10°/s，先更新速度/heading再移动。3km确定性Radar，队内即时共享、无记忆。
 
-武器1000m、ATA半角30°、target aspect半角45°，自动、同步、最近合法目标且victim去重。50m swept collision只计每步每机安全事件、不致死、可同step weapon；OOB仍死亡。Reward保持+10 kill、-10 weapon loss、-5每机collision event、-20 OOB、terminal±20/0，不含shaping。
+武器1000m、ATA半角30°、target aspect半角45°，自动同步、最近合法目标且victim去重。50m swept collision仅计每步每机安全事件、不致死；OOB仍死亡。Reward为+10 kill、-10 weapon loss、-5 collision event、-20 OOB、terminal±20/0，无potential。
 
-边界控制完全保留：当前速度/heading名义预测下一步越界时，仅朝反向heading转向，仍受10°/s限制，可能OOB；不加margin、中心返回或安全层。
+边界函数完全不变：当前速度/heading名义预测下一步越界时，仅朝反向heading有限转向；不加margin或安全层，仍可能OOB。
 
 ## 运行（WSL + conda uav）
 
@@ -38,16 +31,15 @@ source /home/hpk/anaconda3/etc/profile.d/conda.sh
 conda activate uav
 cd /mnt/c/Users/HPK/Desktop/3_uav
 pytest -q
-# Blue配置字段清理后的短接口smoke，不代表学习性训练
-uav2d-train --config configs/smoke.yaml --output runs/v2_2_rear_pursuit/smoke
+uav2d-train --config configs/smoke.yaml --output runs/v2_3_greedy_shooter/smoke
 python scripts/sanity_check.py --mode all --episodes 100 \
-  --seed-start 200000 --output runs/v2_2_rear_pursuit/sanity.json
+  --seed-start 200000 --output runs/v2_3_greedy_shooter/sanity.json
 python scripts/behavioral_audit.py --episodes 20 \
-  --output runs/v2_2_rear_pursuit/behavioral_audit.json
+  --output runs/v2_3_greedy_shooter/behavioral_audit.json
 ```
 
-四模式：rule-vs-rule、random-vs-rule、passive-vs-rule、direct-pursuit-vs-rule。最后一项仅重命名报告标签，Red simple direct-pursuit函数保持原样。
+四模式：greedy-vs-greedy、random-vs-greedy、passive-vs-greedy、direct-pursuit-vs-greedy。最后一组仅检查原helper与正式规则一致性；本轮和greedy-vs-greedy的100局结果完全相同，逐步动作差为0。timeout与draw分别统计。
 
-采样仍为16个独立持久进程、learner默认CUDA、rollout128，所有MAPPO/PPO设置不变。smoke沿用CPU/2workers/64宽配置；不是正式128宽网络。配置的默认输出目录命名保留V2.1，后续实验必须用--output指定新目录以区分Blue版本；不要覆盖历史数据。
+正式采样仍为CUDA learner、16个独立持久环境进程、rollout128，未修改训练参数；短smoke沿用CPU/2workers/64宽配置。默认配置输出目录命名保留V2.1，后续实验用--output单独指定Blue版本目录，不覆盖历史数据。评估、resume/init-checkpoint接口不变，不添加课程或Categorical迁移。
 
-uav2d-evaluate仍支持--config、--checkpoint、--episodes、--seed-start、--output和--gif；评估为确定性tanh(mean)。普通resume/init-checkpoint语义不变，无课程或旧Categorical迁移。日志保留双方alive、weapon kill/loss、OOB、collision events、windows、contact、length、五reward及八PPO指标。
+日志保留双方alive、weapon kill/loss、OOB、collision events、window、contact、length、五reward与八PPO指标。当前Greedy双方100局均有weapon combat，但45%达到300步、碰撞惩罚仍主导return；是否进入50k由用户审查后决定，不能仅凭胜率启动长训。
