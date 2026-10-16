@@ -29,7 +29,6 @@ class EnvironmentConfig:
     attack_ata_degrees: float = 30.0
     attack_aspect_degrees: float = 45.0
     collision_distance: float = 50.0
-    blue_escape_distance: float | None = None
 
     def __post_init__(self) -> None:
         if self.spawn_y_max - self.spawn_y_min < 4 * self.min_spawn_y_separation:

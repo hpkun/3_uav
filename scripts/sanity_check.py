@@ -10,7 +10,7 @@ from uav_mappo_2d.env import UAVCombatEnv
 from uav_mappo_2d.opponents import RuleBasedOpponent
 
 
-MODES = ("rule-vs-rule", "random-vs-rule", "passive-vs-rule", "pursuit-vs-rule")
+MODES = ("rule-vs-rule", "random-vs-rule", "passive-vs-rule", "direct-pursuit-vs-rule")
 
 
 def pursuit_red_actions(env):
@@ -75,7 +75,7 @@ def run_scenario(config_path, mode, episodes, seed_start):
                 red = rng.uniform(-1, 1, (env.N_AGENTS, env.ACTION_DIM)).astype(np.float32)
             elif mode == 'passive-vs-rule':
                 red = np.zeros((env.N_AGENTS, env.ACTION_DIM), dtype=np.float32)
-            elif mode == 'pursuit-vs-rule':
+            elif mode == 'direct-pursuit-vs-rule':
                 red = pursuit_red_actions(env)
             else:
                 raise ValueError(f'Unknown sanity mode: {mode}')
@@ -86,7 +86,7 @@ def run_scenario(config_path, mode, episodes, seed_start):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Continuous 5v5 V2.1 behavioral sanity checks')
+    parser = argparse.ArgumentParser(description='Fixed 5v5 rear-aspect Blue behavioral sanity checks')
     parser.add_argument('--config', default='configs/base.yaml')
     parser.add_argument('--mode', choices=('all', *MODES), default='all')
     parser.add_argument('--episodes', type=int, default=100)

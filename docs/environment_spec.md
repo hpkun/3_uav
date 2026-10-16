@@ -1,15 +1,17 @@
-# 文献约束下的二维连续5v5多无人机对抗基线 V2.1
+# 文献约束下的二维连续5v5基线：Rear-Pursuit Blue
 
-基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。本轮只改变collision、event reward与规则Blue及对应接口/统计；V2动力学、初始化、Radar、Weapon、Actor68D、Critic60D、Gaussian网络和PPO核心冻结。
+基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。本轮仅更换规则Blue并删除旧Blue距离配置；V2.1的动力学、初始化、Radar、Weapon、collision/OOB、Reward、Actor68D、Critic60D、Gaussian网络与PPO核心完全冻结。验证记录编号V2.2只标识此次Blue-policy实验，不代表重构环境物理。
 
 ## 1. 文献原则与实现约定分工
 
-本轮核对原文，使用下列来源，不把它们不一致的物理参数直接拼接：
-- [孙笠晋、李智：基于多智能体强化学习的无人机对抗技术研究](../基于多智能体强化学习的无人机对抗技术研究_孙笠晋%20(1).pdf)，PDF第4页/印刷页58，第2节和3.1节：二维、速度/航向、加速度与角速度动作、10000m地图。原文8v8、MADDPG，不宣称本项目复现其算法或积分顺序。
-- [邓岩：基于深度强化学习的无人机集群空战决策研究](C:/Users/HPK/Downloads/基于深度强化学习的无人机集群空战决策研究_邓岩.pdf)，PDF第30页/印刷页21，表3.1：探测3000m、攻击1000m。该文含弹药、探测角、概率等，本项目只沿用距离尺度，不引入其余机制。
-- [刘莹春：基于强化学习的无人机集群协同打击策略研究](C:/Users/HPK/Downloads/基于强化学习的无人机集群协同打击策略研究_刘莹春.pdf)，PDF第39–40页/印刷页28–29，3.3.1与式(3.11)：nearest-target、距离阈值触发escape/否则chase，collision作为惩罚事件；第38–40页支持攻击、边界与碰撞事件反馈。其原文为x/y加速度、不同空间尺度/概率攻击，不能拿来声称本项目转率/武器/奖励值完全来自原文。
+本轮重新核对项目PDF封面及第三章，区分下列文献，不混用作者与题名，也不直接拼接不同物理参数：
 
-| Item | Literature-supported principle | V2.1 implementation | Literature parameter / implementation convention | Notes |
+- [孙世彬：《基于多智能体强化学习的大规模无人机集群博弈对抗研究》](../基于多智能体强化学习的大规模无人机集群博弈对抗研究_孙世彬%20(1).pdf)，东南大学硕士论文，2025。第三章3.4.2，PDF第43页/印刷页35，固定规则交战阶段提出尽量保持探测目标并绕到敌机后方有效攻击。本文作者是孙世彬，不是孙笠晋；下一条是另外一篇独立论文。这里只借鉴交战战术目标，不照搬其突进/巡航阶段，也不实现巡航FSM。
+- [孙笠晋、李智：基于多智能体强化学习的无人机对抗技术研究](../基于多智能体强化学习的无人机对抗技术研究_孙笠晋%20(1).pdf)，PDF第4页/印刷页58，第2节和3.1节：二维、速度/航向、加速度与角速度动作、10000m地图。原文8v8、MADDPG，不宣称本项目复现其算法或积分顺序。
+- 邓岩：《基于深度强化学习的无人机集群空战决策研究》，PDF第30页/印刷页21，表3.1：探测3000m、攻击1000m。该文含弹药、探测角、概率等，本项目只沿用距离尺度，不引入其余机制。
+- 刘莹春：《基于强化学习的无人机集群协同打击策略研究》，第3章3.2.3、3.3.1及式(3.11)，PDF第38–40页/印刷页27–29：碰撞作为安全惩罚事件，以及攻击/边界事件反馈。只保留该原则作为冻结的V2.1奖励语义来源，不借用其低层动作、概率攻击或空间尺度。未随项目保存的论文只列作者/题名/章节，不创建本机绝对路径链接。
+
+| Item | Literature-supported principle | Current implementation | Literature parameter / implementation convention | Notes |
 |---|---|---|---|---|
 | 二维状态与连续动作 | 孙笠晋第2/3.1节，位置/速度/航向与加速度/角速度 | [x,y,v,h]，[a_norm,omega_norm] | 原则有文献支持，动作归一化/积分时序为约定 | action-immediate semi-implicit保留V2 |
 | 定高/固定5v5 | 二维集群仿真，刘莹春3.3.1为5v5 | 无z，双方各5架 | 场景约束与文献同类设置 | 不泛化NvN |
@@ -23,12 +25,13 @@
 | 68D / 60D编码 | 局部Actor/全局Critic | 固定ID slots、三角编码、valid、alive | implementation convention | 不用nearest-K |
 | 武器角度 | 距离与攻击/目标几何判定 | ATA±30°、aspect±45° | 冻结的implementation convention | 尤其45° target aspect不是上述文献直接参数 |
 | 碰撞 | 刘莹春式(3.11)以空间接近触发惩罚 | 50m swept检测、每步每机去重、不致死 | 原则有依据；50m与swept是implementation convention | 原文阈值/尺度/惩罚不照搬 |
-| Blue追逃 | 刘莹春3.3.1最近敌机、近则escape/否则chase | 每步最近detected、无target memory | 原则有依据；continuous heading适配为约定 | 无assignment/tail/patrol/避碰 |
-| 逃逸阈值 | 原文给出切换规则，未公开具体阈值 | null运行时取attack_range=1000m | implementation convention，不是literature parameter | 为不引入额外尺度统一为attack_range |
+| Blue目标选择 | 基于当前可探测目标进行追踪的常见原则 | 每步每机选最近detected敌机，等距小ID | 最近距离/ID tie-break为implementation convention | 不做target memory或assignment |
+| Blue交战目标 | 孙世彬第三章固定规则交战阶段：绕到敌机后方有效攻击 | nearest-detected-target rear-aspect pursuit | 战术原则有文献支持，连续控制公式为implementation convention | 不恢复原文巡航或新增战术模式 |
+| Rear approach point | 原文未公开本项目所需连续低层控制公式 | p_rear=p_target-attack_range*[cos(h_target),sin(h_target)] | implementation convention，不是论文原公式/原参数 | 距离尺度仅用已有attack_range，不新增可调尾距 |
 | Blue边界返回 | 本轮明确指定的简化反向航向规则 | 当前heading名义预测下一步越界时，朝h+pi转向 | continuous finite-turn implementation adaptation | 不声称原文证明有限转率下必不出界；无margin |
 | Reward | 击毁/损失/碰撞/边界/结果的事件反馈原则 | +10/-10/-5/-20/±20，shared-team sum | 数值和shared-team reward adaptation为implementation convention | 不照搬原文步进惩罚或概率反馈 |
 
-阈值说明：论文只给出了“距离低于阈值执行逃逸，否则追击”的规则，没有公开该阈值具体数值。本项目为了不引入额外尺度，将blue_escape_distance统一为已有attack_range。这是implementation convention，不是literature parameter。为边界明确，代码使用d≤threshold为escape、d>threshold为chase；等号归属也是约定。
+将攻击距离作为尾后接近点的距离尺度，是本项目为了将“绕到敌机后方”转化为连续控制目标而采用的实现约定，不是参考文献公开的控制公式。原文没有保证这个点跟踪控制在有限转率/恒速下必然形成攻击窗口，必须用实际轨迹审计验证。
 
 ## 2. 最终完整配置
 
@@ -45,7 +48,6 @@
 | radar_range / attack_range | 3000 / 1000m |
 | attack_ata_degrees / attack_aspect_degrees | 30° / 45°，半角，inclusive |
 | collision_distance | 50m，inclusive |
-| blue_escape_distance | null → 运行时attack_range；允许显式数值 |
 | weapon_kill_reward / weapon_loss_penalty | 10 / 10 |
 | collision_penalty / oob_penalty / terminal_reward | 5 / 20 / 20 |
 | hidden_size / Actor / Critic | 128 / 68-128-128-2 / 60-128-128-1 |
@@ -124,38 +126,34 @@ RewardConfig仅上述五个权重，REWARD_COMPONENTS仅kill_reward、weapon_los
 
 ## 7. 唯一Blue规则完整伪代码
 
-RuleBasedOpponent()无参数、无持久target数组、无controller state；act(env,team=1)返回(5,2) float32。规则双方使用两个独立对象。
+RuleBasedOpponent()无参数、无状态，act(env,team=1)返回(5,2) float32。每架独立重新选择当前最近detected目标，等距小ID，允许多机同目标；不读隐藏敌机。
 
 ```text
 actions = zeros(5,2)
 detected = team_detected_enemy_mask(team)
-escape_distance = attack_range if blue_escape_distance is null else blue_escape_distance
 for each alive UAV i:
-    predicted = p_i + v_i*[cos(h_i),sin(h_i)]*dt
-    if any(abs(predicted)>map_size/2):
-        desired = wrap(h_i+pi)
-    else:
-        j = nearest currently detected enemy (distance, enemy_id tie-break)
-        if no j:
-            continue                        # [0,0] straight
-        delta = p_j-p_i
-        if distance(i,j)<=escape_distance:
-            delta = -delta                  # escape
-        desired = atan2(delta.y,delta.x)     # otherwise chase
-    error = wrap(desired-h_i)
-    actions[i] = [0, clip(error/(radians(10)*dt),-1,1)]
+    desired = boundary_heading(...)  # 保留原nominal one-step prediction
+    if desired is None:
+        j = nearest detected enemy (distance, enemy_id)
+        if no j: continue            # [0,0] straight ingress
+        e_target = [cos(h_j),sin(h_j)]
+        p_rear = p_j - attack_range*e_target
+        delta = p_rear-p_i
+        desired = h_j if norm(delta)<1e-6 else atan2(delta.y,delta.x)
+    omega_norm = clip(wrap(desired-h_i)/(radians(10)*dt),-1,1)
+    actions[i] = [0,omega_norm]
 return actions
 ```
 
-优先级仅Boundary > Chase/Escape > Straight。Blue不加减速，保持各自95–105m/s初速，无target记忆、assignment、tail/offset/预测点、patrol、collision avoidance、threat break、hysteresis或FSM。
+优先级仅Boundary Return > Rear-Aspect Pursuit > Straight Ingress。不加减速，保持各自初始化速度；没有target memory、assignment、额外尾距、patrol、避碰controller、threat break、head-on特殊情况或FSM。rear point每步由当前目标位置/heading重新计算，不是预测点。仅在数值退化时用target heading回退，不增加战术状态。
 
-边界返回是在连续控制约束下采用朝反向航向转向的实现适配，不是瞬时物理反转。每步重新名义预测，未增加margin；最大转率限制下仍可能OOB，必须如实计数，不隐式保护Blue。精确pi的wrap落在-pi，是通用角度表示的数值归属，不另加固定左右让行规则。
+boundary_heading保持原样：当前速度/heading名义预测下一步将越过±5000时，desired=wrap(h+pi)，再通过原有限转率controller转向。没有margin/safe point/map center/clamp/teleport或瞬时heading翻转。仍可能OOB，这是保留的限制。
 
 ## 8. 未改变的连续MAPPO与采样
 
 Gaussian mean MLP、状态无关log_std、tanh采样及Jacobian logprob correction、atanh重算、pre-squash Normal entropy近似、dead active mask、float32 (T,E,5,2) buffer、team GAE、所有PPO核心参数保留。无action masks。父进程批量推理、先向全部worker发送后收集，每个worker独立env与Blue，默认16个真正子进程和CUDA learner。
 
-普通resume恢复optimizer/计数，init-checkpoint只载兼容权重，不构成课程。旧V2 continuous权重形状相容但奖励/对手任务已变化，不能用旧实验宣称V2.1效果；本轮验证全部从零训练，不迁移旧Categorical权重。总steps按全部环境合计，最后horizon缩短、不向上取整。
+普通resume恢复optimizer/计数，init-checkpoint只载兼容权重，不构成课程。旧连续权重形状可能相容，但对手已变化，旧实验不能作为当前Blue训练证据；本轮只执行接口smoke和规则行为验证，没有50k或2M训练，不迁移旧Categorical权重。总steps按全部环境合计，最后horizon缩短、不向上取整。
 
 ## 9. 统计定义
 
@@ -165,6 +163,6 @@ attack window为pre-weapon全部合法pair数，包含碰撞事件参与者；co
 
 death_total仅weapon_loss+oob，weapon_death_share分母0时为0。碰撞另报每局events与collision episode rate（该回合至少一事件的比例），不计算collision death share。sanity额外报告weapon_combat_episode_rate。
 
-episodes.csv逐回合；updates.csv每更新记录最近100回合均值/WDL与八PPO指标；TensorBoard/console同步。sanity四模式各100局：rule双方独立规则对象，random红U(-1,1)²，passive红[0,0]，pursuit红最近detected直接追击、a=0、无escape，边界仅同一nominal reversal。
+episodes.csv逐回合；updates.csv每更新记录最近100回合均值/WDL与八PPO指标；TensorBoard/console同步。sanity四模式各100局：rule双方独立规则对象，random红U(-1,1)²，passive红[0,0]，direct-pursuit红方仍为最近detected目标当前位置直接追击、a=0，边界仅同一nominal reversal；其策略函数与上一版相同。
 
-实际结果见[validation_v2_1_5v5.md](validation_v2_1_5v5.md)。旧validation_v2_5v5.md仅历史，不改其原始行为数据。
+当前结果见[validation_v2_2_rear_pursuit.md](validation_v2_2_rear_pursuit.md)。validation_v2_1_5v5.md及更早文档为历史，不覆盖其原始实验数据；旧策略结果不能视为新Blue结果。

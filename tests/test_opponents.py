@@ -15,20 +15,47 @@ def setup_pair(make_env,distance):
     return env
 
 
-@pytest.mark.parametrize('distance,expected',[(1000.001,-.5),(1000,1.),(999,1.)])
-def test_chase_escape_inclusive_threshold_and_no_acceleration(make_env,distance,expected):
+@pytest.mark.parametrize('distance',[1500,1000,500])
+def test_rear_pursuit_at_all_target_distances_without_acceleration(make_env,distance):
     env = setup_pair(make_env,distance)
+    delta = np.array([distance,-1000.])
+    desired = math.atan2(delta[1],delta[0])
     action = RuleBasedOpponent().act(env)[0]
-    np.testing.assert_allclose(action,[0,expected],atol=1e-6)
+    expected = RuleBasedOpponent.control(env,1,0,desired)
+    np.testing.assert_allclose(action,expected,atol=1e-6)
+    # Both direct pursuit and moving away have different turn semantics here.
+    assert action[0] == 0 and action[1] == -1
 
 
-def test_escape_threshold_null_tracks_attack_range_and_explicit_override(make_env):
+@pytest.mark.parametrize('heading,expected',[(0,[-1000,0]),(math.pi/2,[0,-1000])])
+def test_rear_point_geometry_uses_existing_attack_range(make_env,heading,expected):
     env = setup_pair(make_env,800)
-    env.config.attack_range = 700
-    assert env.config.blue_escape_distance is None
-    assert RuleBasedOpponent().act(env)[0,1] == pytest.approx(-.5)
-    env.config.blue_escape_distance = 900
-    assert RuleBasedOpponent().act(env)[0,1] == 1
+    env.positions[0,0] = (0,0)
+    env.headings[0,0] = heading
+    np.testing.assert_allclose(RuleBasedOpponent.rear_point(env,1,0),expected,atol=1e-12)
+    env.config.attack_range = 750
+    np.testing.assert_allclose(RuleBasedOpponent.rear_point(env,1,0),np.array(expected)*.75,atol=1e-12)
+    assert not hasattr(env.config,'blue_escape_distance')
+
+
+def test_rear_heading_is_not_direct_or_away_and_has_no_speed_control(make_env):
+    env = setup_pair(make_env,2000)
+    env.headings[1,0] = math.atan2(-1000,2000)+math.radians(2)
+    actual = RuleBasedOpponent().act(env)[0]
+    np.testing.assert_allclose(actual,[0,-.2],atol=1e-6)
+    direct = RuleBasedOpponent.control(env,1,0,0.)
+    away = RuleBasedOpponent.control(env,1,0,math.pi)
+    assert not np.allclose(actual,direct) and not np.allclose(actual,away)
+
+
+@pytest.mark.parametrize('offset',[0.,5e-7])
+def test_rear_point_numerical_fallback_is_target_heading(make_env,offset):
+    env = setup_pair(make_env,1000)
+    env.positions[0,0],env.headings[0,0] = (0,0),0.
+    env.positions[1,0],env.headings[1,0] = (-1000+offset,0),math.radians(5)
+    action = RuleBasedOpponent().act(env)[0]
+    np.testing.assert_allclose(action,[0,-.5],atol=1e-6)
+    assert np.isfinite(action).all()
 
 
 def test_nearest_detected_target_per_agent_tie_id_and_reselection(make_env):
@@ -42,7 +69,8 @@ def test_nearest_detected_target_per_agent_tie_id_and_reselection(make_env):
     assert rule.nearest_target(env,1,1,mask) == 0
     env.positions[0,1] = (0,-1200)
     assert rule.nearest_target(env,1,0,env.team_detected_enemy_mask(1)) == 1
-    assert rule.act(env)[0,1] == -1
+    desired = math.atan2(*((rule.rear_point(env,1,1)-env.positions[1,0])[::-1]))
+    np.testing.assert_allclose(rule.act(env)[0],rule.control(env,1,0,desired))
     assert not vars(rule)
 
 

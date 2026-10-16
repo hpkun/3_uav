@@ -13,7 +13,7 @@ def test_v2_1_config_defaults_and_no_active_old_courses():
     defaults = ProjectConfig()
     assert cfg.environment == defaults.environment and cfg.reward == defaults.reward
     assert cfg.mappo == defaults.mappo and cfg.training == defaults.training
-    assert cfg.environment.blue_escape_distance is None
+    assert not hasattr(cfg.environment,'blue_escape_distance')
     assert set(vars(cfg.reward)) == {
         'weapon_kill_reward','weapon_loss_penalty','collision_penalty','oob_penalty','terminal_reward'}
     for name in ['blue_strategy','blue_tail_distance','blue_assignment_interval',

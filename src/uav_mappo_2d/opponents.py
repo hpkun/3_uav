@@ -7,7 +7,7 @@ from .env import UAVCombatEnv, wrap_angle
 
 
 class RuleBasedOpponent:
-    """Stateless nearest-detected-target chase/escape with finite-turn boundary return."""
+    """Stateless nearest-detected-target rear-aspect pursuit."""
 
     @staticmethod
     def control(env, team, agent, desired_heading):
@@ -35,21 +35,24 @@ class RuleBasedOpponent:
             float(np.linalg.norm(env.positions[1-team, j] - env.positions[team, agent])), int(j),
         ))
 
+    @staticmethod
+    def rear_point(env, team, target):
+        heading = env.headings[1-team, target]
+        return env.positions[1-team, target] - env.config.attack_range * np.array([
+            math.cos(heading), math.sin(heading),
+        ])
+
     def act(self, env, team=1):
         actions = np.zeros((UAVCombatEnv.N_AGENTS, UAVCombatEnv.ACTION_DIM), dtype=np.float32)
         detected = env.team_detected_enemy_mask(team)
-        threshold = env.config.blue_escape_distance
-        if threshold is None:
-            threshold = env.config.attack_range
         for agent in np.flatnonzero(env.alive[team]):
             heading = self.boundary_heading(env, team, agent)
             if heading is None:
                 target = self.nearest_target(env, team, agent, detected)
                 if target is None:
                     continue
-                delta = env.positions[1-team, target] - env.positions[team, agent]
-                if np.linalg.norm(delta) <= threshold:
-                    delta = -delta
-                heading = math.atan2(float(delta[1]), float(delta[0]))
+                delta = self.rear_point(env, team, target) - env.positions[team, agent]
+                heading = (float(env.headings[1-team, target]) if np.linalg.norm(delta) < 1e-6
+                           else math.atan2(float(delta[1]), float(delta[0])))
             actions[agent] = self.control(env, team, agent, heading)
         return actions
