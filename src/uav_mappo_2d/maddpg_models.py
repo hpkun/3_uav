@@ -18,8 +18,11 @@ class MADDPGActor(nn.Module):
         super().__init__()
         self.network = mlp(observation_dim, 2, hidden_size)
 
+    def pre_tanh(self, observation):
+        return self.network(observation)
+
     def forward(self, observation):
-        return torch.tanh(self.network(observation))
+        return torch.tanh(self.pre_tanh(observation))
 
 
 class MADDPGCritic(nn.Module):

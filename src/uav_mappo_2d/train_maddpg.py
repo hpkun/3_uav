@@ -15,7 +15,7 @@ from .config import load_config
 from .env import UAVCombatEnv
 from .evaluate import resolve_device
 from .evaluate_maddpg import evaluate
-from .maddpg import MADDPG, JointReplayBuffer, OUNoise
+from .maddpg import MADDPG, JointReplayBuffer, OUNoise, ACTOR_DIAGNOSTICS, ACTOR_AGGREGATES
 from .maddpg_config import load_maddpg_config
 from .parallel_env import ParallelUAVEnvs
 
@@ -51,6 +51,10 @@ def log_line(step, total, episodes, replay_size, updates, rows, metrics):
                  f'Q/y={metrics["mean_q"]:.3f}/{metrics["mean_target_q"]:.3f} '
                  f'TD={metrics["mean_td_abs"]:.3f} grad(A/C)='
                  f'{metrics["mean_actor_grad_norm"]:.3f}/{metrics["mean_critic_grad_norm"]:.3f}') if metrics else 'warmup (loss=N/A)'
+    if metrics:
+        algorithm += (f' Replay-batch[reg={metrics["mean_actor_reg"]:.3g} |z|={metrics["mean_pre_tanh_abs"]:.3g} '
+                      f'zmax={metrics["max_pre_tanh_abs"]:.3g} tanh\'={metrics["mean_tanh_derivative"]:.3g} '
+                      f'sat(A/W)={metrics["mean_accel_saturation"]:.1%}/{metrics["mean_turn_saturation"]:.1%}]')
     if not rows:
         return (f'[MADDPG] step={step}/{total} ({step/max(total,1):.1%}) episodes={episodes} '
                 f'replay={replay_size} updates={updates} episode_metrics=N/A (no completed episodes) {algorithm}')
@@ -103,6 +107,7 @@ def run_training(config, algorithm):
             metric_fields = ['updated_agents',*['mean_'+k for k in ('actor_loss','critic_loss','q','target_q',
                               'td_abs','actor_grad_norm','critic_grad_norm')],
                              *[f'agent{i}_{k}' for i in range(5) for k in ('actor_loss','critic_loss','updated')]]
+            metric_fields += [*ACTOR_AGGREGATES, *[f'agent{i}_{k}' for i in range(5) for k in ACTOR_DIAGNOSTICS]]
             uw = csv.DictWriter(us,fieldnames=['global_step','update','replay_size','noise_sigma',*metric_fields])
             uw.writeheader()
             while step < total:
@@ -139,7 +144,10 @@ def run_training(config, algorithm):
                                      noise_sigma=algorithm.ou_sigma,**metrics))
                     tags = {'mean_actor_loss':'actor_loss_mean','mean_critic_loss':'critic_loss_mean',
                             'mean_q':'q_mean','mean_target_q':'target_q_mean','mean_td_abs':'td_abs_mean',
-                            'mean_actor_grad_norm':'actor_grad_norm','mean_critic_grad_norm':'critic_grad_norm'}
+                            'mean_actor_grad_norm':'actor_grad_norm','mean_critic_grad_norm':'critic_grad_norm',
+                            'mean_actor_reg':'actor_reg_mean','mean_pre_tanh_abs':'pre_tanh_abs_mean',
+                            'max_pre_tanh_abs':'pre_tanh_abs_max','mean_tanh_derivative':'tanh_derivative_mean',
+                            'mean_accel_saturation':'accel_saturation_mean','mean_turn_saturation':'turn_saturation_mean'}
                     for key,value in metrics.items():
                         writer.add_scalar('maddpg/'+tags.get(key,key),value,step)
                     writer.add_scalar('maddpg/replay_size',len(replay),step)

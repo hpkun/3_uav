@@ -16,12 +16,15 @@ class MADDPGConfig:
     update_interval_steps: int = 100
     max_grad_norm: float = .5
     actor_regularization: float = .001
+    actor_regularization_mode: str = 'bounded_action'
     ou_mu: float = 0.
     ou_theta: float = .15
     ou_sigma: float = .20
     learning_starts: int | None = None
 
     def __post_init__(self):
+        if self.actor_regularization_mode not in ('bounded_action', 'pre_tanh'):
+            raise ValueError('actor_regularization_mode must be bounded_action or pre_tanh')
         for name in ('hidden_size', 'buffer_capacity', 'batch_size', 'update_interval_steps'):
             if not isinstance(getattr(self, name), int) or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be a positive integer')

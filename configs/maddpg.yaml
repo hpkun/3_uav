@@ -9,6 +9,7 @@ batch_size: 1024
 update_interval_steps: 100
 max_grad_norm: 0.5
 actor_regularization: 0.001
+actor_regularization_mode: bounded_action
 ou_mu: 0.0
 ou_theta: 0.15
 ou_sigma: 0.20

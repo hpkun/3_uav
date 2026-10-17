@@ -10,6 +10,24 @@ from .maddpg_config import MADDPGConfig
 from .maddpg_models import MADDPGActor, MADDPGCritic
 
 
+ACTOR_DIAGNOSTICS = ('actor_reg', 'pre_tanh_abs_mean', 'pre_tanh_abs_max',
+                     'tanh_derivative_mean', 'accel_saturation', 'turn_saturation')
+ACTOR_AGGREGATES = dict(zip(
+    ('mean_actor_reg', 'mean_pre_tanh_abs', 'max_pre_tanh_abs', 'mean_tanh_derivative',
+     'mean_accel_saturation', 'mean_turn_saturation'), ACTOR_DIAGNOSTICS))
+
+
+@torch.no_grad()
+def actor_diagnostics(z, action, reg):
+    """Read-only current Actor, active Replay rows, before optimizer.step (not rollout)."""
+    z, action = z.detach(), action.detach()
+    return dict(actor_reg=float(reg.detach()), pre_tanh_abs_mean=float(z.abs().mean()),
+                pre_tanh_abs_max=float(z.abs().max()),
+                tanh_derivative_mean=float((1-action.square()).mean()),
+                accel_saturation=float((action[:,0].abs() >= .95).float().mean()),
+                turn_saturation=float((action[:,1].abs() >= .95).float().mean()))
+
+
 class JointReplayBuffer:
     SHAPES = {'observations': (5,68), 'states': (60,), 'actions': (5,2), 'rewards': (),
               'next_observations': (5,68), 'next_states': (60,), 'dones': (),
@@ -133,11 +151,16 @@ class MADDPG:
         critic.requires_grad_(False)
         try:
             joint = batch['actions'][active].detach().clone()
-            action = self.actors[i](batch['observations'][active,i])
+            z = self.actors[i].pre_tanh(batch['observations'][active,i])
+            action = torch.tanh(z)
             joint[:,i] = action  # only actor i has an action gradient
             pg_loss = -critic(batch['states'][active], joint).mean()
-            reg = self.config.actor_regularization * action.square().mean()
+            # V1 tests the original distribution-parameter regularization intent
+            # under our bounded tanh adaptation; it is not line-by-line equivalence.
+            regularized = z if self.config.actor_regularization_mode == 'pre_tanh' else action
+            reg = self.config.actor_regularization * regularized.square().mean()
             loss = pg_loss + reg
+            diagnostics = actor_diagnostics(z, action, reg)
             if not torch.isfinite(loss):
                 raise FloatingPointError('Non-finite actor loss')
             opt = self.actor_optimizers[i]
@@ -146,7 +169,7 @@ class MADDPG:
             grad = clip_parameter_gradients(self.actors[i].parameters(), self.config.max_grad_norm)
             opt.step()
             return dict(actor_loss=float(loss.detach()), actor_grad_norm=grad,
-                        policy_gradient_loss=float(pg_loss.detach()), actor_reg=float(reg.detach()))
+                        policy_gradient_loss=float(pg_loss.detach()), **diagnostics)
         finally:
             critic.requires_grad_(True)
 
@@ -172,6 +195,13 @@ class MADDPG:
             for key,rows in [('actor_loss',actors),('critic_loss',critics)]:
                 metrics[f'agent{i}_{key}'] = rows[i][key] if rows[i] is not None else 0.
             metrics[f'agent{i}_updated'] = int(actors[i] is not None)
+        for aggregate, key in ACTOR_AGGREGATES.items():
+            values = [row[key] for row in actors if row is not None]
+            metrics[aggregate] = float((max if aggregate == 'max_pre_tanh_abs' else np.mean)(values)) if values else 0.
+        for i, row in enumerate(actors):
+            for key in ACTOR_DIAGNOSTICS:
+                # Empty active sets retain the existing zero + updated=0 convention.
+                metrics[f'agent{i}_{key}'] = row[key] if row is not None else 0.
         if not np.isfinite(list(metrics.values())).all():
             raise FloatingPointError(f'Non-finite MADDPG metrics: {metrics}')
         return metrics
@@ -192,6 +222,8 @@ class MADDPG:
         payload = torch.load(path, map_location=self.device, weights_only=False)
         if payload.get('algorithm') != 'maddpg':
             raise ValueError('Not a MADDPG checkpoint (MAPPO checkpoints are incompatible)')
+        payload['maddpg_config'] = dict(payload['maddpg_config'])
+        payload['maddpg_config'].setdefault('actor_regularization_mode', 'bounded_action')
         if payload['maddpg_config'] != asdict(self.config):
             raise ValueError('MADDPG config must match the checkpoint')
         for key in ('actors','critics','target_actors','target_critics'):
