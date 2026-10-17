@@ -1,14 +1,14 @@
-# V2.4 Endpoint Collision：固定5v5连续二维Greedy基线
+# V2.5 邓岩速度与概率攻击：固定5v5连续二维Greedy基线
 
-基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。V2.4只将collision检测改为endpoint、penalty改为0.2；Greedy Blue、动力学、初始化、Radar、Weapon、OOB、其余Reward、Actor68D、Critic60D、Gaussian网络与PPO核心完全冻结。
+基于多篇二维无人机集群对抗文献共同建模范式构建的连续5v5基线，不是任何单篇论文的完全复现。V2.5将速度范围改为200–400m/s、初速固定300m/s，武器改为1000m/前向±90°扇区与70%概率命中。Greedy Blue、Radar、OOB、endpoint collision、全部Reward、68D Actor/60D Critic、网络与算法超参数保持不变。详见[参数来源与适配范围](environment_v2_5_deng_combat.md)。
 
 ## 1. 文献原则与实现约定分工
 
-正式Blue保留已核对的于欣萌第三章规则；本轮用PDF技能核对刘莹春碰撞公式。来源分开，不混用作者、题名或低层动作接口：
+正式Blue保留已核对的于欣萌第三章规则；碰撞沿用V2.4已核对的刘莹春碰撞公式。来源分开，不混用作者、题名或低层动作接口：
 
 - 于欣萌：《基于强化学习的无人机集群对抗方法研究》，大连理工大学硕士论文，2025，第3.2.2节(2)，PDF第40–41页/印刷页30–31，公式(3.17)–(3.19)：每步在探测内按欧氏距离选最近敌机，导航方向指向该目标当前位置，允许多机同目标，无显式协商/去冲突。论文原动作是二维连续控制力/导航向量，不是本项目的加速度/转率接口。此PDF未随项目保存，故只列作者、题名和章节，不创建本机绝对路径链接。
 - [孙笠晋、李智：基于多智能体强化学习的无人机对抗技术研究](../基于多智能体强化学习的无人机对抗技术研究_孙笠晋%20(1).pdf)，PDF第4页/印刷页58，第2节和3.1节：二维、速度/航向、加速度与角速度动作、10000m地图。原文8v8、MADDPG，不宣称本项目复现其算法或积分顺序。
-- 邓岩：《基于深度强化学习的无人机集群空战决策研究》，PDF第30页/印刷页21，表3.1：探测3000m、攻击1000m。该文含弹药、探测角、概率等，本项目只沿用距离尺度，不引入其余机制。
+- 邓岩：《基于深度强化学习的无人机集群空战决策研究》，PDF第30页/印刷页21，表3.1：速度200–400m/s、探测3000m、攻击1000m、攻击角90°、命中率70%。V2.5采用这些明确参数；初速300为项目中点约定。弹药6与探测角90°暂未采用。这里依据本次提供的论文参数，不新增未经核对的页码或lambda/gamma数值。
 - 刘莹春：《基于强化学习的无人机集群协同打击策略研究》，第3章3.2.3、3.3.1及式(3.11)，PDF第38–40页/印刷页27–29：式(3.11)在当前中心距离<0.5时对个体施加-0.2，存在任一其它UAV即触发。V2.4采用当前距离小额安全惩罚思想与0.2系数；项目50m、inclusive ≤、shared-team按参与者累加、RR/BB/RB全部统计以及非致死时序是implementation adaptation。没有移植原文步进惩罚、概率攻击、空间尺度或低层动作。未随项目保存的论文只列作者/题名/章节，不创建本机绝对路径链接。
 
 | Item | Literature-supported principle | Current implementation | Literature parameter / implementation convention | Notes |
@@ -16,14 +16,14 @@
 | 二维状态与连续动作 | 孙笠晋第2/3.1节，位置/速度/航向与加速度/角速度 | [x,y,v,h]，[a_norm,omega_norm] | 原则有文献支持，动作归一化/积分时序为约定 | action-immediate semi-implicit保留V2 |
 | 定高/固定5v5 | 二维集群仿真，刘莹春3.3.1为5v5 | 无z，双方各5架 | 场景约束与文献同类设置 | 不泛化NvN |
 | 地图 | 孙笠晋3.1为10000m×10000m | ±5000m方形 | 尺度有文献支持，坐标原点为约定 | 对称OOB死亡是本项目规则 |
-| 探测/攻击距离 | 邓岩表3.1 | 3000m / 1000m | literature parameter，来自距离尺度而非完整模型 | 不继承其导弹、命中概率或探测锥 |
+| 探测/攻击距离 | 邓岩表3.1 | 3000m / 1000m | literature parameter，来自距离尺度而非完整模型 | 另采用其速度、攻击角和命中概率，未增加弹药或探测锥 |
 | Radar/共享 | 有限观测、队内信息共享的通用范式 | 确定性360°、任一友机发现即共享、无记忆 | implementation convention | 不将隐藏敌机传给Blue |
 | dt | 时间离散化 | 1s | implementation convention | 不宣称唯一论文值 |
-| 初速/速度范围 | 有界运动学 | U(95,105) / 50–150m/s | implementation convention | 初速每机独立 |
+| 初速/速度范围 | 有界运动学 | 300 / 200–400m/s | 范围为论文参数，初速为中点约定 | 300不是论文初速 |
 | 加速度/转率 | 连续受限控制 | ±10m/s² / ±10°/s | implementation convention | 不是瞬时反向 |
 | 出生与heading | 独立随机初始化 | 红x[-3800,-3200]，蓝[3200,3800]，y[-3000,3000]、同队间隔500，航向±5° | implementation convention | 无镜像五航线 |
 | 68D / 60D编码 | 局部Actor/全局Critic | 固定ID slots、三角编码、valid、alive | implementation convention | 不用nearest-K |
-| 武器角度 | 距离与攻击/目标几何判定 | ATA±30°、aspect±45° | 冻结的implementation convention | 尤其45° target aspect不是上述文献直接参数 |
+| 武器角度 | 距离与攻击/目标几何判定 | 前向alpha±90°，70%概率命中 | 邓岩明确参数，按本轮要求90°解释为半角 | beta保留观测，武器不检查target heading |
 | 碰撞 | 刘莹春式(3.11)当前中心距离触发-0.2安全惩罚 | post-OOB/pre-weapon、endpoint ≤50m、RR/BB/RB、每步每机去重、不致死 | 50m、inclusive、shared-team累计、非致死时序为implementation adaptation | 不完整复现原文归一化环境 |
 | Blue目标选择 | 于欣萌(3.17)–(3.18)，探测内最近敌机 | 每机每步在team detected集合按(distance,ID)选目标 | 最近准则为文献规则；team sharing和等距ID为implementation adaptation/convention | 无target memory或assignment |
 | Blue移动方向 | 于欣萌(3.19)，导航向量沿p_target-p_own | desired=atan2(delta_y,delta_x)，经原有限转率control输出[0,omega_norm] | 方向有直接依据；有限转率与a_norm=0为implementation adaptation | 不照搬二维控制力或增益κ，不引入基地目标 |
@@ -39,14 +39,14 @@ Greedy Shooter没有显式协商，不意味着本项目取消了冻结的team r
 |---|---|
 | N_AGENTS / OBS_DIM / STATE_DIM / ACTION_DIM | 5 / 68 / 60 / 2 |
 | map_size / dt / episode_steps | 10000m / 1s / 300 |
-| speed_min / speed_max | 50 / 150m/s |
-| initial_speed_min / max | 95 / 105m/s |
+| speed_min / speed_max | 200 / 400m/s |
+| initial_speed_min / max | 300 / 300m/s（项目约定） |
 | max_acceleration / max_turn_rate_degrees | 10m/s² / 10°/s |
 | spawn_x_min / max | 3200 / 3800m，红取负蓝取正 |
 | spawn_y_min / max / min_spawn_y_separation | -3000 / 3000 / 500m |
 | heading_jitter_degrees | 5°，红围绕0、蓝围绕pi |
 | radar_range / attack_range | 3000 / 1000m |
-| attack_ata_degrees / attack_aspect_degrees | 30° / 45°，半角，inclusive |
+| attack_angle_degrees / hit_probability | 90°半角，inclusive / 0.70 |
 | collision_distance | 50m，inclusive |
 | weapon_kill_reward / weapon_loss_penalty | 10 / 10 |
 | collision_penalty / oob_penalty / terminal_reward | 0.2 / 20 / 20 |
@@ -67,19 +67,19 @@ Greedy Shooter没有显式协商，不意味着本项目取消了冻结的team r
 
 configs/base.yaml为正式配置。smoke保持既有轻量设置：seed11、隐藏64、epoch2、batch32、1280步、2进程、rollout64、log256、checkpoint/eval640、内置eval4、CPU；未为V2.1调整PPO。正式网络/PPO与V2逐项相同，models.py和mappo.py未修改。
 
-## 3. 冻结的运动学与初始化
+## 3. 运动学与初始化
 
 ```text
 a = a_norm * 10
 omega = omega_norm * radians(10)
-v_next = clip(v + a*dt, 50, 150)
+v_next = clip(v + a*dt, 200, 400)
 h_next = wrap(h + omega*dt)            # [-pi,pi)
 p_next = p + dt*v_next*[cos(h_next),sin(h_next)]
 ```
 
-动作当前步即影响位移，死亡机冻结；全环境动作(2,5,2) float32，单机范围[-1,1]²，非法shape/非有限/越界拒绝（仅1e-6浮点容差）。速度、heading扰动每机独立，红蓝坐标分别采样。每队最多1000次rejection保证y间隔≥500，fallback均匀点+独立小jitter并置换ID，红蓝独立。不恢复镜像五航线。
+动作当前步即影响位移，死亡机冻结；全环境动作(2,5,2) float32，单机范围[-1,1]²，非法shape/非有限/越界拒绝（仅1e-6浮点容差）。初速固定300，heading扰动每机独立，红蓝坐标分别采样。每队最多1000次rejection保证y间隔≥500，fallback均匀点+独立小jitter并置换ID，红蓝独立。不恢复镜像五航线。
 
-## 4. 冻结的Radar、Actor、Critic和Weapon
+## 4. Radar、Actor、Critic和V2.5 Weapon
 
 team_detected_enemy_mask(team)：存在任一存活友机距敌机≤3000m即detected，360°range-only、即时理想共享、无contact memory；离开全队覆盖立即隐藏。Blue不能读隐藏敌机。
 
@@ -87,15 +87,15 @@ alpha=wrap(LOS-own_heading)，beta=wrap(LOS-other_heading)。Actor固定68D，0-
 
 | 索引 | 内容 |
 |---|---|
-| 0–4 | x/5000,y/5000,2*(v-50)/100-1,sin(h),cos(h) |
+| 0–4 | x/5000,y/5000,2*(v-200)/200-1,sin(h),cos(h) |
 | 5–32 | 其余4友机，按ID升序跳过自身，各7D |
 | 33–67 | 5敌机固定ID，各7D |
 
-7D=[d/(sqrt(2)*10000),sin(alpha),cos(alpha),sin(beta),cos(beta),clip(delta_v/100,-1,1),valid]。存活友机始终已知，敌机只填detected活机。死亡/隐藏slot零；死亡Actor整个68D零。
+7D=[d/(sqrt(2)*10000),sin(alpha),cos(alpha),sin(beta),cos(beta),clip(delta_v/200,-1,1),valid]。存活友机始终已知，敌机只填detected活机。死亡/隐藏slot零；死亡Actor整个68D零。
 
 Critic60D按R0–R4/B0–B4排列，各[x/5000,y/5000,v_norm,sin(h),cos(h),alive]。死亡slot零，全局状态不受Radar限制。
 
-Weapon：d≤1000 AND |alpha|≤30° AND |beta|≤45°，无fire动作，直接击毁；尾追有效、迎头无效。每攻击者选最近合法目标，等距小ID；同一pre-weapon alive快照收集后同步结算，支持mutual kill，多攻击者同victim只计一次weapon kill。collision不再排除任何活机；OOB机依旧排除。
+Weapon资格：d≤attack_range(1000) AND |alpha|≤radians(attack_angle_degrees=90)，边界inclusive；不检查beta/aspect。每攻击者每step选最近合法目标，等距小ID，调用一次env.np_random.random()，仅当random<hit_probability(.70)时加入victims。全部攻击使用同一post-OOB/post-collision/pre-weapon alive快照，完成所有随机试验后同步删除victims，支持mutual kill，多攻击者命中同victim只计一次kill/loss。collision参与者仍可攻击，OOB机排除。无fire动作、弹药或冷却，miss无额外奖励或惩罚。
 
 ## 5. Collision/OOB/terminal顺序
 
@@ -158,10 +158,10 @@ Gaussian mean MLP、状态无关log_std、tanh采样及Jacobian logprob correcti
 
 统一字段red_collision_events/blue_collision_events，env累计collision_events；不保留错误语义的collision_losses或red_collision兼容key。其余包括双方alive、combat_kill、weapon_loss、oob、attack_window、radar_contact_steps、length、return/result与五reward分量。
 
-attack window为pre-weapon全部合法pair数，包含碰撞事件参与者；contact steps每step同team至少一个contact加1（OOB后/weapon前）。相同range与共享使双方contact steps对称。
+attack window为post-OOB/post-collision/pre-weapon全部满足d≤1000、|alpha|≤90°的几何pair数，包含碰撞参与者；它不是发射次数、命中次数或击杀次数，miss时仍累计，不得用window/kill或kill/window推算命中率；contact steps每step同team至少一个contact加1（OOB后/weapon前）。相同range与共享使双方contact steps对称。
 
 death_total仅weapon_loss+oob，weapon_death_share分母0时为0。碰撞另报每局events与collision episode rate（该回合至少一事件的比例），不计算collision death share。sanity额外报告weapon_combat_episode_rate。
 
-episodes.csv逐回合；updates.csv每更新记录最近100回合均值/WDL与八PPO指标；TensorBoard/console同步。sanity四模式各100局：greedy-vs-greedy双方独立Greedy对象，random-vs-greedy红U(-1,1)²，passive-vs-greedy红[0,0]，direct-pursuit-vs-greedy红方使用原direct-pursuit helper。第四组是控制语义一致性对照，不是另一种强弱对手。本轮两个对称组100局统计完全相同，所有step helper与正式Red策略动作差为0。另记录timeout episode rate，不能把timeout等同draw。
+episodes.csv逐回合；updates.csv每更新记录最近100回合均值/WDL与八PPO指标；TensorBoard/console同步。sanity四模式各100局：greedy-vs-greedy双方独立Greedy对象，random-vs-greedy红U(-1,1)²，passive-vs-greedy红[0,0]，direct-pursuit-vs-greedy红方使用原direct-pursuit helper。第四组是控制语义一致性对照，不是另一种强弱对手。V2.4历史两个对称组100局统计完全相同；V2.5本轮仅运行Greedy-vs-Greedy 100局，结果单独保存。另记录timeout episode rate，不能把timeout等同draw。
 
-当前结果见[validation_v2_4_endpoint_collision.md](validation_v2_4_endpoint_collision.md)。validation_v2_1_5v5.md、validation_v2_2_rear_pursuit.md、validation_v2_3_greedy_shooter.md、collision_audit_v2_3.md原样保留为历史，不覆盖原始数据。旧swept审计的生产一致性断言只适用于V2.3；V2.4使用validate_v2_4.py逐步物理轨迹/逐局反事实验收。本轮只做pytest、100局Greedy验收与1280步smoke，不自动50k或2M。
+当前结果见[validation_v2_5_deng_combat.md](validation_v2_5_deng_combat.md)。V2.1/V2.2/V2.3/V2.4 validation与旧审计数据保留原样。历史collision_audit.py与validate_v2_4.py入口明确拒绝在当前版本套用旧断言；当前使用validate_v2_5.py、behavioral_audit.py、sanity_check.py和replay_html.py。只做完整pytest、100局Greedy与两种算法短smoke，不启动正式RL训练。

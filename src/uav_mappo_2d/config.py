@@ -12,10 +12,10 @@ class EnvironmentConfig:
     map_size: float = 10_000.0
     dt: float = 1.0
     episode_steps: int = 300
-    speed_min: float = 50.0
-    speed_max: float = 150.0
-    initial_speed_min: float = 95.0
-    initial_speed_max: float = 105.0
+    speed_min: float = 200.0
+    speed_max: float = 400.0
+    initial_speed_min: float = 300.0
+    initial_speed_max: float = 300.0
     max_acceleration: float = 10.0
     max_turn_rate_degrees: float = 10.0
     spawn_x_min: float = 3_200.0
@@ -26,11 +26,21 @@ class EnvironmentConfig:
     heading_jitter_degrees: float = 5.0
     attack_range: float = 1_000.0
     radar_range: float = 3_000.0
-    attack_ata_degrees: float = 30.0
-    attack_aspect_degrees: float = 45.0
+    attack_angle_degrees: float = 90.0
+    hit_probability: float = 0.70
     collision_distance: float = 50.0
 
     def __post_init__(self) -> None:
+        if not 0 < self.speed_min < self.speed_max:
+            raise ValueError("Require 0 < speed_min < speed_max")
+        if not self.speed_min <= self.initial_speed_min <= self.initial_speed_max <= self.speed_max:
+            raise ValueError("Initial speeds must be ordered and within the speed bounds")
+        if not self.attack_range > 0:
+            raise ValueError("attack_range must be positive")
+        if not 0 < self.attack_angle_degrees <= 180:
+            raise ValueError("attack_angle_degrees must be in (0, 180]")
+        if not 0 <= self.hit_probability <= 1:
+            raise ValueError("hit_probability must be in [0, 1]")
         if self.spawn_y_max - self.spawn_y_min < 4 * self.min_spawn_y_separation:
             raise ValueError("Spawn y range cannot fit five separated UAVs")
 

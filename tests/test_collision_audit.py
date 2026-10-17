@@ -129,7 +129,7 @@ def test_v24_production_matches_historical_liu_counterfactual(make_env, zero_act
 
 
 def test_pre_weapon_mask_keeps_weapon_victims(make_env, zero_actions):
-    env = make_env((0, 0), (1, 0))
+    env = make_env((0, 0), (1, 0),hit_probability=1.)
     env.positions[0, 0], env.positions[1, 0] = (0, 0), (20, 0)
     env.headings.fill(0)
     env.speeds.fill(100)

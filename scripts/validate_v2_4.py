@@ -44,6 +44,9 @@ def historical_environment(audit):
 
 
 def validate(output):
+    raise RuntimeError('Historical V2.4 validator: run from the V2.4 checkout with its config. '
+                       'For current production use scripts/validate_v2_5.py; V2.5 cannot match V2.3 trajectories.')
+    # The original historical validator is retained below for reference.
     audit_path = ROOT / 'runs/v2_3_greedy_shooter/collision_audit.json'
     audit = json.loads(audit_path.read_text(encoding='utf-8'))
     cfg = load_config(ROOT / 'configs/base.yaml')

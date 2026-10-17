@@ -11,7 +11,8 @@
 </style>
 </head>
 <body>
-<header><h1>V2.4 · 5v5 空战回放</h1><p id="metadata" class="meta muted"></p><p id="episode-meta" class="meta"></p></header>
+<header><h1>V2.5 · 5v5 空战回放</h1><p id="metadata" class="meta muted"></p><p id="episode-meta" class="meta"></p></header>
+<p class="note">攻击窗口是几何合法pair数，包含miss，不等于尝试或击杀次数；正式命中概率70%。武器死亡来自真实状态变化，成功攻击者ID未知。</p>
 <main class="layout">
 <section class="panel battle" aria-label="二维空战轨迹与播放控制">
 <canvas id="battlefield" width="1000" height="1000" role="img" aria-label="10km等比例战场，红蓝飞机航向及当前步之前的历史轨迹">需要支持Canvas的浏览器。</canvas>
@@ -70,7 +71,12 @@ function draw(){
   if(selected){const team=selected[0]==='R'?0:1,agent=Number(selected[1]);if(f.alive[team][agent]){
     const [x,y]=worldToCanvas(...f.positions[team][agent]);ctx.save();ctx.beginPath();ctx.rect(pad,pad,side,side);ctx.clip();
     for(const [id,radius,color]of [['radar',meta.config.environment.radar_range,'radar'],['attack',meta.config.environment.attack_range,'attack']]){
-      if(!el(id).checked)continue;ctx.beginPath();ctx.arc(x,y,radius/mapSize*side,0,2*Math.PI);ctx.strokeStyle=css(color);ctx.lineWidth=1.5;ctx.setLineDash([7,6]);ctx.stroke();
+      if(!el(id).checked)continue;ctx.beginPath();
+      if(id==='attack'){
+        const halfAngle=meta.config.environment.attack_angle_degrees*Math.PI/180, heading=-f.headings[team][agent];
+        ctx.moveTo(x,y);ctx.arc(x,y,radius/mapSize*side,heading-halfAngle,heading+halfAngle);ctx.closePath();
+      }else{ctx.arc(x,y,radius/mapSize*side,0,2*Math.PI);}
+      ctx.strokeStyle=css(color);ctx.lineWidth=1.5;ctx.setLineDash([7,6]);ctx.stroke();
     }ctx.restore();
   }}
   for(let team=0;team<2;team++)for(let agent=0;agent<5;agent++){

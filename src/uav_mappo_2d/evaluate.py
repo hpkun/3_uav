@@ -117,7 +117,7 @@ def evaluate_policy(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate deterministic tanh-mean MAPPO in fixed 5v5 continuous V2.1"
+        description="Evaluate deterministic tanh-mean MAPPO in fixed 5v5 continuous V2.5"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--checkpoint", required=True)

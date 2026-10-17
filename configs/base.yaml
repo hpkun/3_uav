@@ -4,10 +4,10 @@ environment:
   map_size: 10000.0
   dt: 1.0
   episode_steps: 300
-  speed_min: 50.0
-  speed_max: 150.0
-  initial_speed_min: 95.0
-  initial_speed_max: 105.0
+  speed_min: 200.0
+  speed_max: 400.0
+  initial_speed_min: 300.0
+  initial_speed_max: 300.0
   max_acceleration: 10.0
   max_turn_rate_degrees: 10.0
   spawn_x_min: 3200.0
@@ -18,8 +18,8 @@ environment:
   heading_jitter_degrees: 5.0
   radar_range: 3000.0
   attack_range: 1000.0
-  attack_ata_degrees: 30.0
-  attack_aspect_degrees: 45.0
+  attack_angle_degrees: 90.0
+  hit_probability: 0.70
   collision_distance: 50.0
 
 reward:

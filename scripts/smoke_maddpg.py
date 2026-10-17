@@ -1,6 +1,6 @@
 """Short MADDPG linkage verification, never a 2M experiment."""
 import argparse
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import csv
@@ -21,12 +21,17 @@ def parameters(group):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output',default='runs/v2_4_maddpg_smoke_seed7')
-    parser.add_argument('--device',default='cuda')
+    parser.add_argument('--output',default='runs/v2_5_deng_combat/maddpg_smoke')
+    parser.add_argument('--device',default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--algo-config',default='configs/maddpg.yaml')
+    parser.add_argument('--parallel-envs',type=int,default=2,
+                        help='Smoke-only worker count; formal config remains 16')
     args = parser.parse_args()
+    if Path(args.output).exists():
+        raise FileExistsError('Choose a new smoke output directory')
     cfg = load_config('configs/base.yaml')
-    cfg.training = replace(cfg.training,total_env_steps=2560,output_dir=args.output,device=args.device,
+    cfg.training = replace(cfg.training,total_env_steps=2560,parallel_envs=args.parallel_envs,
+                           output_dir=args.output,device=args.device,
                            log_interval_steps=512,checkpoint_interval_steps=1280,
                            evaluation_interval_steps=1280,evaluation_episodes=4)
     algo = replace(load_maddpg_config(args.algo_config),batch_size=32,
@@ -80,8 +85,15 @@ def main():
         episodes = list(csv.DictReader(stream))
     assert len(updates)==24 and checkpoint['global_step']==2560
     assert all(np.isfinite(float(v)) for row in updates for v in row.values())
+    accounting_errors = [abs(float(row['return']) - sum(float(row[k]) for k in
+                         ('kill_reward','weapon_loss_reward','collision_reward','oob_reward','terminal_reward')))
+                         for row in episodes]
+    assert accounting_errors and max(accounting_errors) < 1e-9
+    assert checkpoint['environment_config']['environment'] == asdict(cfg.environment)
     assert checkpoint['maddpg_config']['actor_regularization_mode'] == algo.actor_regularization_mode
-    report = dict(global_step=2560,updates=len(updates),episodes=len(episodes),
+    report = dict(device=args.device,cuda_available=torch.cuda.is_available(),
+                  max_reward_accounting_error=max(accounting_errors),config_snapshot_exact=True,
+                  global_step=2560,updates=len(updates),episodes=len(episodes),
                   actor_regularization_mode=algo.actor_regularization_mode,
                   actor_formula_checks=len(formula_errors),actor_formula_max_error=max(formula_errors),
                   parameter_l2_changes=changes,soft_update_tau=algo.tau,soft_formula_max_error=error,

@@ -11,7 +11,7 @@ def setup_pair(make_env,distance):
     env.positions[1,0],env.positions[0,0] = (0,0),(distance,0)
     env.headings[1,0] = math.radians(5)
     env.headings[0,0] = math.pi/2
-    env.speeds.fill(100)
+    env.speeds.fill(300)
     return env
 
 
@@ -105,7 +105,7 @@ def test_boundary_nominal_prediction_priority_finite_turn_no_state_mutation(make
     env.positions[1,0,axis] = sign*4950
     heading = {(0,1):0.,(0,-1):math.pi,(1,1):math.pi/2,(1,-1):-math.pi/2}[axis,sign]
     env.headings[1,0] = heading
-    env.speeds[1,0] = 100
+    env.speeds[1,0] = 300
     env.positions[0,0] = env.positions[1,0] - np.array([0,300])
     rule = RuleBasedOpponent()
     before = [v.copy() for v in [env.positions,env.speeds,env.headings,env.alive]]
@@ -120,9 +120,9 @@ def test_boundary_nominal_prediction_priority_finite_turn_no_state_mutation(make
 
 def test_nominal_endpoint_exact_boundary_not_triggered(make_env):
     env = setup_pair(make_env,1200)
-    env.positions[1,0] = (4900,0)
+    env.positions[1,0] = (4700,0)
     env.headings[1,0] = 0
-    env.positions[0,0] = (4900,1200)
+    env.positions[0,0] = (4700,1200)
     assert RuleBasedOpponent.boundary_heading(env,1,0) is None
     np.testing.assert_allclose(RuleBasedOpponent().act(env)[0],[0,1])
 
@@ -139,9 +139,9 @@ def test_boundary_is_not_shield_and_can_still_oob(make_env,zero_actions):
 def test_no_contact_speed_and_heading_remain_initial_over_steps(make_env,zero_actions):
     env = make_env((1,0),(0,0))
     env.positions[1,0],env.positions[0,0] = (2500,2500),(-2500,-2500)
-    env.speeds[1,0],env.headings[1,0] = 103,.1
+    env.speeds[1,0],env.headings[1,0] = 300,.1
     rule = RuleBasedOpponent()
     for _ in range(3):
         zero_actions[1] = rule.act(env)
         env.step(zero_actions)
-    assert env.speeds[1,0] == 103 and env.headings[1,0] == pytest.approx(.1)
+    assert env.speeds[1,0] == 300 and env.headings[1,0] == pytest.approx(.1)

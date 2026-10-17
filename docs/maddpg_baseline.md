@@ -1,5 +1,7 @@
 # V2.4 独立 Vanilla MADDPG Baseline
 
+> 本文的V2.4冻结范围与实验数字是历史记录，保留原样。当前正式环境已升级V2.5（200–400m/s、初速300、1000m/±90°/70%概率攻击），算法profile仍使用本文的配置；当前环境与回归结果见[设计说明](environment_v2_5_deng_combat.md)和[验收报告](validation_v2_5_deng_combat.md)。
+
 ## 1. 范围与结果
 
 本轮新增独立MADDPG，不改名/复用MAPPO学习器，不共享Actor/Critic，不实现单team Critic。冻结的V2.4环境、Greedy Blue、Radar/Weapon/OOB/Reward/endpoint collision、68D局部观测、60D state和原MAPPO均不变。

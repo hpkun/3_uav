@@ -30,6 +30,7 @@ def pursuit_red_actions(env):
 
 
 def summarize(rows):
+    """Report actual kills; attack windows are geometric pairs, never a hit-rate denominator."""
     episodes = len(rows)
     wins = sum(row['result'] == 'win' for row in rows)
     draws = sum(row['result'] == 'draw' for row in rows)
@@ -95,7 +96,7 @@ def run_scenario(config_path, mode, episodes, seed_start):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='V2.3 Greedy Shooter behavioral sanity checks')
+    parser = argparse.ArgumentParser(description='V2.5 Greedy Shooter behavioral sanity checks')
     parser.add_argument('--config', default='configs/base.yaml')
     parser.add_argument('--mode', choices=('all', *MODES), default='all')
     parser.add_argument('--episodes', type=int, default=100)

@@ -1,65 +1,39 @@
-# V2.4 Endpoint Collision：Greedy-Shooter Blue
+# V2.5：连续二维5v5空战
 
-固定连续二维5v5环境。本轮只将正式collision从swept改为endpoint center-distance，penalty从5.0改为0.2。Greedy Blue、动力学、初始化、Radar/共享、68D Actor/60D Critic、Weapon、OOB、其余Reward、Gaussian Actor/MAPPO和所有PPO超参数保持不变。
+当前正式环境将速度与基础武器模型对齐到本次提供的邓岩《基于深度强化学习的无人机集群空战决策研究》参数：速度200–400m/s、攻击距离1000m、前向攻击半角90°、命中概率70%、探测距离3000m。初速固定300m/s是项目取中点的约定，不来自论文。
 
-Blue只有三层：Boundary Return > Greedy Direct Pursuit > Straight Flight。每机每步独立选择当前team detected敌机中最近者，等距小ID；期望heading直接指向目标当前位置，a_norm恒0。无目标[0,0]；死亡机零动作。无目标记忆、分配/去冲突、虚拟目标点、逃逸、避碰、Boids、FSM、patrol或调速。
+来源分类与适配边界见[V2.5设计说明](docs/environment_v2_5_deng_combat.md)，全部参数和接口见[当前环境规范](docs/environment_spec.md)，测试及100局结果见[V2.5验收](docs/validation_v2_5_deng_combat.md)。V2.3/V2.4报告与实验数据保留为历史，不改写历史数字。V2.5不是论文环境的逐行复现。
 
-文献依据：于欣萌《基于强化学习的无人机集群对抗方法研究》，第3.2.2节(2)、式(3.17)–(3.19)，PDF第40–41页/印刷页30–31。论文直接给出探测内最近敌机、沿目标当前位置方向逼近、允许多机同目标的规则。原文是二维导航/控制向量；本项目采用冻结team radar共享、目标bearing→有限转率控制、a_norm=0和原boundary return，属于implementation adaptation，不是论文低层公式完全复现。
+武器资格为`distance <= 1000 AND abs(wrap(LOS_heading-attacker_heading)) <= 90°`，边界inclusive；不检查target aspect。每个攻击者每step按(distance,target ID)选一个最近合法目标，用`env.np_random.random() < .70`试验一次。所有试验共用pre-weapon快照，再同步结算去重victims。attack windows计全部几何合法pair，包含miss；它不等于尝试、命中或击杀次数，不能拿window/kill推算命中率。
 
-完整参数与来源见[环境规范](docs/environment_spec.md)；当前测试、100局逐步轨迹对照、逐局counterfactual核账和smoke见[V2.4验收](docs/validation_v2_4_endpoint_collision.md)。V2.1/V2.2/[V2.3验收](docs/validation_v2_3_greedy_shooter.md)及[V2.3只读碰撞审计](docs/collision_audit_v2_3.md)原样保留为历史。本轮未运行50k或2M。
+10km地图、dt1s、300步、加速度±10m/s²、转率±10°/s、spawn、endpoint非致死碰撞、OOB顺序保持原样。Reward仍为kill +10、weapon loss -10、OOB -20、collision participant-event -0.2、terminal ±20/0，无miss penalty或shaping。OBS/STATE/ACTION仍为68/60/2。
 
-## 冻结环境
+Greedy Blue仍是Boundary Return > nearest detected Direct Pursuit > Straight Flight，acceleration=0，自然以初速300m/s飞行。探测仍为V2.4的360°range-only与即时team sharing。没有实现ammo=6、radar angle、fire action或cooldown，理由见设计说明。MAPPO/MADDPG/OU/网络与正式算法超参数未改。
 
-10km方形地图、dt1s、最多300步；速度50–150m/s、初速95–105m/s；连续加速度±10m/s²、转率±10°/s，先更新速度/heading再移动。3km确定性Radar，队内即时共享、无记忆。
-
-武器1000m、ATA半角30°、target aspect半角45°，自动同步、最近合法目标且victim去重。collision在movement后、OOB后、weapon前，对仍alive的RR/BB/RB全部pair计算当前中心距离，≤50m触发；每机每步最多一个event、不致死、不阻止本步weapon。Reward为+10 kill、-10 weapon loss、-0.2 collision participant-event、-20 OOB、terminal±20/0，无potential。
-
-刘莹春《基于强化学习的无人机集群协同打击策略研究》第3.2.3节式(3.11)（正文28页/PDF39页）提供当前距离触发小额-0.2安全惩罚的依据。原文为归一化距离<0.5；本项目50m、inclusive ≤、shared-team按本队参与者累计、双阵营全部pair及非致死时序属于implementation adaptation，不是完整复现论文。
-
-V2.3采用swept/-5，其只读审计中58.95%的pair-step为swept-only，71.88%为RB，碰撞绝对奖励分量占约58%。V2.4将其恢复为辅助安全项。历史swept诊断不进入当前正式Reward、observation或state，也没有新增cooldown或避碰。
-
-边界函数完全不变：当前速度/heading名义预测下一步越界时，仅朝反向heading有限转向；不加margin或安全层，仍可能OOB。
-
-## 运行（WSL + conda uav）
-
-Windows终端：
+## PowerShell / conda uav
 
 ```powershell
-wsl -d Ubuntu
-```
-
-WSL：
-
-```bash
-source /home/hpk/anaconda3/etc/profile.d/conda.sh
 conda activate uav
-cd /mnt/c/Users/HPK/Desktop/3_uav
+cd C:\Users\HPK\Desktop\3_uav
+python -m pip install -e '.[dev]'
 pytest -q
-python scripts/validate_v2_4.py --smoke
+python scripts/validate_v2_5.py
+python scripts/validate_v2_5.py --smoke-only
+python scripts/smoke_maddpg.py --parallel-envs 2
 ```
 
-V2.4验收只跑Greedy-vs-Greedy的100个固定seed200000–200099。validate_v2_4.py从记录的V2.3提交c33ed9e读取并验证与历史审计SHA256一致的环境源码，在隔离模块中做对照，不修改或patch生产类；该提交不可用时明确停止。逐步核对动作/物理状态/obs/state/RNG，逐局核对历史Liu-style反事实；通过后--smoke才运行1280步短训。结果在runs/v2_4_endpoint_collision/，复跑请用--output选择新目录，避免覆盖或追加旧smoke。
+先做100局规则验收，再做短smoke。CUDA可用时使用CUDA；MAPPO沿用1280步轻量profile，MADDPG沿用2560步smoke临时batch32/learning_starts128/buffer4096，Windows资源受限时用2worker。正式base仍16worker，算法正式配置文件未改；smoke不评价性能，不启动50k或2M。输出在`runs/v2_5_deng_combat/`；复跑选新目录，避免覆盖。Windows旧pytest临时目录权限不足时可加`--basetemp tmp/pytest_v25_new`。
 
-原sanity四模式接口保留；本轮不额外运行random/passive。scripts/collision_audit.py和scripts/behavioral_audit.py是保留的V2.3 swept审计工具，不能用它们的旧断言验证V2.4生产语义。其历史数据/报告不覆盖；当前使用validate_v2_4.py。
+`sanity_check.py`四模式接口保留；当前行为审计用`behavioral_audit.py`。历史`collision_audit.py`、`validate_v2_4.py`需使用相应历史checkout，入口会拒绝在当前代码直接套用旧验收。
 
-正式采样仍为CUDA learner、16个独立持久环境进程、rollout128，未修改训练参数；短smoke沿用CPU/2workers/64宽配置。默认配置输出目录命名保留V2.1，后续实验用--output单独指定Blue版本目录，不覆盖历史数据。评估、resume/init-checkpoint接口不变，不添加课程或Categorical迁移。
+## 回放与算法
 
-日志保留双方alive、weapon kill/loss、OOB、collision events、window、contact、length、五reward与八PPO指标；collision events现在指endpoint unique participants。45%达到300步和OOB等问题本轮不改；是否进入50k由用户审查V2.4验收后决定，不自动长训。
+[单文件HTML回放说明](docs/html_replay.md)。使用本次MAPPO smoke checkpoint（hidden64）生成回放：
 
-## 单文件 HTML 录像（只读）
-
-完整用法和时间对齐说明见[HTML回放文档](docs/html_replay.md)。以下在WSL的conda uav中执行；生成文件可直接双击离线播放，无CDN/图片帧/JSON旁文件，不改环境或checkpoint，也不自动打开浏览器。
-
-```bash
-PYTHONPATH=src python scripts/replay_html.py \
-  --config configs/base.yaml \
-  --checkpoint runs/v2_4_mappo_2m_seed7/checkpoints/best.pt \
-  --seed 3000000 --device cuda \
-  --output runs/v2_4_mappo_2m_seed7/replays/best_seed3000000.html
+```powershell
+python scripts/replay_html.py --config configs/smoke.yaml --checkpoint runs/v2_5_deng_combat/mappo_smoke/checkpoints/final.pt --seed 3000000 --device cuda --output runs/v2_5_deng_combat/replay_current.html
 ```
 
-默认deterministic，与正式evaluate一致；加`--stochastic`则按seed采样。省略`--output`默认生成`runs/replays/<checkpoint_stem>_seed<seed>.html`。已存在的输出会拒绝覆盖，请改文件名。原GIF功能不变。
+正式hidden128 checkpoint使用base配置。smoke已自动生成`mappo_smoke/replay_seed3000000.html`；回放从真实状态变化/info确认weapon death，不猜成功攻击者ID，选中飞机可显示攻击扇区。旧权重形状相容不代表旧实验属于V2.5。
 
-## 独立 MADDPG baseline
-
-新增5个独立Actor、5个centralized Critic及各自target、joint replay与OU探索；正式V2.4环境和MAPPO完全不变。算法参考profile见`configs/maddpg.yaml`，环境仍读`configs/base.yaml`。结构、公式、适配说明、正式训练/评估命令与短程验证见[MADDPG文档](docs/maddpg_baseline.md)。本轮仅完成测试和2560步smoke，未执行2M；MADDPG checkpoint与MAPPO格式不兼容。
+独立MADDPG保持5个Actor/5个centralized Critic及target、joint replay和OU；说明及历史短程结果见[MADDPG文档](docs/maddpg_baseline.md)。其中V2.4实验数字是历史记录；当前环境以V2.5规范为准，MAPPO/MADDPG checkpoint格式仍不兼容。

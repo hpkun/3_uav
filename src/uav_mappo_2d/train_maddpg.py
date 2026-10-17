@@ -1,4 +1,4 @@
-"""Independent off-policy MADDPG trainer; frozen V2.4 process environments."""
+"""Independent off-policy MADDPG trainer; V2.5 process environments."""
 import argparse
 from collections import deque
 import csv

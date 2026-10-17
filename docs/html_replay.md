@@ -1,4 +1,9 @@
-# V2.4 HTML 空战录像
+# V2.5 HTML 空战录像
+
+当前配置使用200–400m/s、初速300m/s、前向±90°/1000m攻击扇区和70%概率命中。
+attack_window是post-OOB/post-collision/pre-weapon的合法几何pair数量，不是尝试、命中或击杀数。
+回放仅从真实alive变化区分OOB和weapon death，并与info核对；不从窗口推断死亡，也不猜成功攻击者ID。
+旧checkpoint形状相容不代表旧实验属于V2.5；metadata中的config表示本次回放运行的环境。
 
 只读运行一个Red MAPPO checkpoint对当前Greedy Blue的完整episode，将数值轨迹、CSS和JavaScript嵌入一个HTML。双击即可离线播放，不需要服务器、网络、CDN、图片帧或JSON旁文件。只新增录像工具，不改变环境、Reward、MAPPO/PPO、checkpoint或原GIF功能。
 
@@ -52,7 +57,7 @@ PYTHONPATH=src python scripts/replay_html.py \
 
 ## 3. 状态面板和时间对齐
 
-顶部显示checkpoint文件、从payload读取的global_step、seed、模式、V2.4、已记录episode最终result和length。不会根据文件名猜训练步数；缺失global_step显示unknown。result以Red为口径，win/loss不代表Blue视角。
+顶部显示checkpoint文件、从payload读取的global_step、seed、模式、V2.5、已记录episode最终result和length。不会根据文件名猜训练步数；缺失global_step显示unknown。result以Red为口径，win/loss不代表Blue视角。
 
 右侧显示当前步与时间、双方alive，以及真实info中的累计weapon kills/losses、OOB、endpoint collision events、attack windows和Radar contact steps。当前帧显示Red本步reward、五项分量和累计return；没有自行定义新Reward。
 

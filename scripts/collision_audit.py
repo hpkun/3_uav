@@ -165,6 +165,9 @@ def burst_summary(rows, episodes):
 
 
 def run(output):
+    raise RuntimeError('Historical V2.3 swept/-5 audit: run from its historical checkout/config. '
+                       'For current V2.5 use scripts/validate_v2_5.py or behavioral_audit.py.')
+    # Historical mathematics and original audit remain available for reference/tests.
     before = protected_hashes()
     cfg = load_config(ROOT / 'configs/base.yaml')
     assert cfg.environment.collision_distance == 50 and cfg.reward.collision_penalty == 5

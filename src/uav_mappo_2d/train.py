@@ -332,7 +332,7 @@ def run_training(config: ProjectConfig, *, resume: str | None = None, init_check
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train continuous MAPPO in Fixed 5v5 2D UAV Combat Baseline V2.1"
+        description="Train continuous MAPPO in Fixed 5v5 2D UAV Combat Baseline V2.5"
     )
     parser.add_argument("--config", default="configs/base.yaml")
     initialization = parser.add_mutually_exclusive_group()

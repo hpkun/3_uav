@@ -17,7 +17,7 @@ def wrap_angle(angle: float | np.ndarray) -> float | np.ndarray:
 
 
 class UAVCombatEnv(gym.Env):
-    """Continuous 5v5 baseline V2.4 with non-lethal endpoint collision events."""
+    """Continuous 5v5 V2.5: Deng speed bounds and probabilistic frontal attacks."""
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 5}
     N_AGENTS = 5
@@ -205,10 +205,9 @@ class UAVCombatEnv(gym.Env):
     def _attack_valid(self, attacker_team, attacker, target_team, target):
         if not (self.alive[attacker_team, attacker] and self.alive[target_team, target]):
             return False
-        distance, alpha, beta = self._compute_pair_geometry(attacker_team, attacker, target_team, target)
+        distance, alpha, _ = self._compute_pair_geometry(attacker_team, attacker, target_team, target)
         return bool(distance <= self.config.attack_range
-                    and abs(alpha) <= math.radians(self.config.attack_ata_degrees) + 1e-12
-                    and abs(beta) <= math.radians(self.config.attack_aspect_degrees) + 1e-12)
+                    and abs(alpha) <= math.radians(self.config.attack_angle_degrees) + 1e-12)
 
     def _resolve_attacks(self):
         victims = [set(), set()]
@@ -221,7 +220,10 @@ class UAVCombatEnv(gym.Env):
                 self.attack_window_count[team] += len(valid)
                 if valid:
                     chosen = min(valid, key=lambda j: (self._compute_pair_geometry(team, attacker, 1 - team, j)[0], j))
-                    victims[1 - team].add(chosen)
+                    # One seeded trial per attacker, even when another attacker
+                    # has already hit this target in the same snapshot.
+                    if self.np_random.random() < self.config.hit_probability:
+                        victims[1 - team].add(chosen)
         kills = np.zeros(2, dtype=np.int32)
         for team in range(2):
             for agent in victims[team]:

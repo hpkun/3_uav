@@ -1,4 +1,4 @@
-"""Record one V2.4 MAPPO-vs-Greedy episode as an offline, single-file HTML.
+"""Record one V2.5 MAPPO-vs-Greedy episode as an offline, single-file HTML.
 
 No renderer, optimizer, production changes, external resources or sidecar files.
 frames[t] is s_t: incoming reward/events refer to t-1 -> t, while its RL fields
@@ -143,7 +143,7 @@ def collect_trace(config, policy, seed, *, deterministic=True):
         assert abs(cumulative - summary['return']) < 1e-9
     finally:
         env.close()
-    return dict(metadata=dict(environment_version='V2.4', seed=seed, deterministic=deterministic,
+    return dict(metadata=dict(environment_version='V2.5', seed=seed, deterministic=deterministic,
                               config=asdict(config),
                               actor_log_std_raw=policy.actor.log_std.detach().cpu().tolist(),
                               actor_log_std_effective=policy.actor.log_std.detach().clamp(-5., 1.).cpu().tolist(),
@@ -159,7 +159,7 @@ def trace_json(trace):
 
 
 def render_html(trace):
-    title = f'V2.4 Replay · {trace["metadata"].get("checkpoint_filename", "checkpoint")} · seed {trace["metadata"]["seed"]}'
+    title = f'V2.5 Replay · {trace["metadata"].get("checkpoint_filename", "checkpoint")} · seed {trace["metadata"]["seed"]}'
     template = TEMPLATE.read_text(encoding='utf-8')
     return template.replace('__PAGE_TITLE__', html.escape(title)).replace('__TRACE_JSON__', trace_json(trace))
 
@@ -197,7 +197,7 @@ def main():
         raise ValueError('--output must end in .html')
     config = load_config(args.config)
     if config.environment.map_size != 10000.:
-        raise ValueError('This fixed V2.4 replay uses a 10000m square battlefield')
+        raise ValueError('This fixed V2.5 replay uses a 10000m square battlefield')
     source_paths = sorted((ROOT / 'src/uav_mappo_2d').glob('*.py')) + [Path(args.config), checkpoint]
     original_hashes = {str(p): sha256(p) for p in source_paths}
     device = resolve_device(args.device or config.training.device)
